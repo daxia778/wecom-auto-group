@@ -1,0 +1,40 @@
+# Build output
+build/
+*.exe
+*.exe~
+!build_go.bat
+!build.bat
+
+# Go
+vendor/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets
+config.json
+
+# Local state
+local_state.json
+
+# Test scripts
+cmd/grouptest/
+cmd/apitest/
+
+# Temp files
+*.png
+*_result.txt
+diag_screenshot*
+
+# Python cache
+__pycache__/
+*.pyc

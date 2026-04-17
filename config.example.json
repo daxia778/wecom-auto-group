@@ -1,0 +1,10 @@
+{
+  "corp_id": "YOUR_CORP_ID",
+  "secret": "YOUR_APP_SECRET",
+  "zhipu_api_key": "YOUR_ZHIPU_API_KEY",
+  "fixed_members": ["员工A", "员工B"],
+  "check_interval": 60,
+  "group_owner": "群主姓名",
+  "target_userid": "",
+  "auto_start": false
+}

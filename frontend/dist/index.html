@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>WeCom 自动建群</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+        :root {
+            --bg-base: #030303;
+            --bg-panel: rgba(255, 255, 255, 0.02);
+            --bg-hover: rgba(255, 255, 255, 0.05);
+            --border-light: rgba(255, 255, 255, 0.08);
+            --border-focus: rgba(255, 255, 255, 0.2);
+            --text-primary: #f4f4f5;
+            --text-secondary: #a1a1aa;
+            --text-tertiary: #71717a;
+            
+            --primary: #3b82f6; 
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+
+            --radius-sm: 6px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, system-ui, 'Microsoft YaHei', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: row; /* ⭐ Left-Right Split */
+            background-image: radial-gradient(circle at top left, rgba(59, 130, 246, 0.05), transparent 40%);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ━━━ Sidebar (Left) ━━━ */
+        .sidebar {
+            width: 280px;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border-light);
+            background: rgba(10, 10, 12, 0.6);
+            backdrop-filter: blur(20px);
+            z-index: 10;
+        }
+
+        .brand-header {
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border-light);
+        }
+        .brand-title {
+            font-size: 15px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .brand-icon {
+            color: var(--primary);
+            font-size: 16px;
+        }
+        .status-dot-wrap {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-tertiary);
+        }
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
+        .status-dot-wrap.connected { color: var(--success); }
+        .status-dot-wrap.connected .status-dot { background: var(--success); box-shadow: 0 0 6px var(--success); }
+        .status-dot-wrap.running .status-dot { background: var(--warning); animation: pulse 1.5s infinite; }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        /* Configuration inside Sidebar */
+        .config-section {
+            padding: 16px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            border-bottom: 1px solid var(--border-light);
+        }
+        .setting-group { display: flex; flex-direction: column; gap: 6px; }
+        .setting-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        select {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-light);
+            color: var(--text-primary);
+            padding: 8px 10px;
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            font-family: inherit;
+            outline: none;
+            cursor: pointer;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%2371717a%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E');
+            background-repeat: no-repeat;
+            background-position: right 8px center;
+            padding-right: 28px;
+            transition: all 0.2s;
+            width: 100%;
+        }
+        select:hover { border-color: var(--border-focus); background: var(--bg-hover); }
+        option { background: #18181b; color: #f4f4f5; padding: 6px 10px; }
+        option:checked { background: #1e3a5f; }
+        /* Log Widget inside Sidebar */
+        .sidebar-logs {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: rgba(0,0,0,0.3);
+        }
+        .log-header {
+            padding: 8px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-light);
+        }
+        .log-body {
+            flex: 1;
+            padding: 10px 20px;
+            overflow-y: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 11px;
+            line-height: 1.6;
+            color: var(--text-secondary);
+        }
+        .log-line span.time { color: var(--text-tertiary); margin-right: 6px; }
+        
+        .btn-clear-log {
+            background: none; border: none; color: var(--text-tertiary);
+            font-size: 11px; cursor: pointer;
+        }
+        .btn-clear-log:hover { color: var(--text-primary); }
+
+        /* ━━━ Main Content (Right) ━━━ */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Top Action Bar (merged Tabs and Search/Fetch) */
+        .top-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            border-bottom: 1px solid var(--border-light);
+            background: rgba(20, 20, 24, 0.4);
+            backdrop-filter: blur(10px);
+            z-index: 10;
+        }
+
+        .nav-tabs {
+            display: flex;
+            background: rgba(0,0,0,0.5);
+            border-radius: var(--radius-sm);
+            padding: 3px;
+            border: 1px solid var(--border-light);
+        }
+        .tab {
+            padding: 6px 14px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .tab:hover { color: var(--text-primary); }
+        .tab.active { background: var(--bg-hover); color: var(--text-primary); box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+
+        /* Actions */
+        .actions-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .search-box {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+        .search-box svg { position: absolute; left: 10px; color: var(--text-tertiary); width:12px; height:12px; }
+        .search-box input {
+            background: var(--bg-panel); border: 1px solid var(--border-light); padding: 6px 10px 6px 28px;
+            color: var(--text-primary); font-size: 12px; border-radius: var(--radius-md); width: 160px;
+            transition: all 0.2s; outline: none;
+        }
+        .search-box input:focus { border-color: var(--border-focus); width: 200px; }
+
+        .btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 6px 12px; border-radius: var(--radius-md);
+            font-size: 12px; font-weight: 500; cursor: pointer;
+            border: 1px solid transparent; font-family: inherit; transition: all 0.2s;
+        }
+        .btn:active { transform: scale(0.98); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .btn-ghost { background: transparent; border: 1px solid var(--border-light); color: var(--text-primary); }
+        .btn-ghost:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-focus); }
+        
+        .btn-primary { background: var(--text-primary); color: var(--bg-base); }
+        .btn-primary:hover:not(:disabled) { background: #fff; box-shadow: 0 0 10px rgba(255,255,255,0.2); }
+
+        /* Progress Bar (slim) */
+        .progress-bar { height: 1px; width: 100%; background: transparent; display: none; }
+        .progress-bar.active { display: block; background: var(--border-light); }
+        .progress-fill { height: 100%; background: var(--primary); width: 0%; transition: width 0.2s; }
+        .progress-bar.indeterminate .progress-fill { width: 30%; animation: indet 1s infinite linear; }
+        @keyframes indet { 0% { transform: translateX(-100%); } 100% { transform: translateX(330%); } }
+
+        /* Workspace Views */
+        .workspace-view { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+        .workspace-view.active { display: flex; }
+
+        /* Table Area */
+        .table-wrap { flex: 1; overflow-y: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+        
+        th {
+            position: sticky; top: 0; background: rgba(10, 10, 14, 0.95); backdrop-filter: blur(8px);
+            padding: 10px 24px; color: var(--text-tertiary); font-weight: 500;
+            border-bottom: 1px solid var(--border-light); z-index: 5; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        
+        td { padding: 8px 24px; border-bottom: 1px solid var(--bg-hover); color: var(--text-secondary); transition: background 0.2s; }
+        tr:hover td { background: rgba(255,255,255,0.02); color: var(--text-primary); }
+        
+        /* Compact Status Indicator */
+        .status-cell { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+        .dot { width: 6px; height: 6px; border-radius: 50%; }
+        .dot-done { background: var(--success); }
+        .dot-pending { background: var(--text-tertiary); }
+        
+        input[type="checkbox"] {
+            appearance: none; width: 14px; height: 14px;
+            border: 1px solid var(--text-tertiary); border-radius: 3px;
+            background: transparent; outline: none; cursor: pointer; position: relative;
+        }
+        input[type="checkbox"]:checked { background: var(--text-primary); border-color: var(--text-primary); }
+        input[type="checkbox"]:checked::after {
+            content: ''; position: absolute; left: 4px; top: 2px; width: 3px; height: 6px;
+            border: solid var(--bg-base); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
+        }
+        input[type="checkbox"]:disabled { opacity: 0.3; cursor: not-allowed; }
+
+        /* Auto Mode Central View */
+        .auto-view-center {
+            margin: auto; display: flex; flex-direction: column; align-items: center; text-align: center;
+        }
+        .bot-ring {
+            width: 70px; height: 70px; border-radius: 50%;
+            background: var(--bg-panel); border: 1px solid var(--border-light);
+            display: flex; align-items: center; justify-content: center; font-size: 28px;
+            margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        .auto-view-center h2 { font-size: 16px; font-weight: 500; color: var(--text-primary); margin-bottom: 8px; }
+        .auto-view-center p { font-size: 12px; color: var(--text-tertiary); max-width: 240px; margin-bottom: 24px; line-height: 1.5; }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+    </style>
+</head>
+<body>
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar">
+        <!-- 1. Brand & Status -->
+        <div class="brand-header">
+            <div class="brand-title"><span class="brand-icon">⚡</span> WAG Engine</div>
+            <div class="status-dot-wrap" id="statusPill">
+                <span class="status-dot"></span>
+                <span id="statusText">Connecting</span>
+            </div>
+        </div>
+
+        <!-- 2. Configuration -->
+        <div class="config-section">
+            <div class="setting-group">
+                <div class="setting-label">目标主理人 (Target)</div>
+                <select id="selTarget" onchange="autoSave()"><option value="">-- 未选择 --</option></select>
+            </div>
+            
+            <div class="setting-group" style="margin-top: 8px;">
+                <div class="setting-label">进群成员 (Fixed Members)</div>
+                <div style="display:flex; flex-direction:column; gap:6px;">
+                    <select id="selF1" onchange="autoSave()"><option value="">-- 协助成员 1 --</option></select>
+                    <select id="selF2" onchange="autoSave()"><option value="">-- 协助成员 2 --</option></select>
+                    <select id="selF3" onchange="autoSave()"><option value="">-- 协助成员 3 --</option></select>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. Real-time Logs -->
+        <div class="sidebar-logs">
+            <div class="log-header">
+                <div class="setting-label" style="font-size:10px;">操作终端 (Console)</div>
+                <button class="btn-clear-log" onclick="clearLogs()">Clear</button>
+            </div>
+            <div class="log-body" id="logArea"></div>
+        </div>
+    </aside>
+
+    <!-- RIGHT MAIN CONTENT -->
+    <main class="main-content">
+        <!-- Unified Toolbar -->
+        <header class="top-toolbar">
+            <div class="nav-tabs">
+                <div class="tab active" onclick="switchTab('manual')">工作台</div>
+                <div class="tab" onclick="switchTab('auto')">全自动模式</div>
+            </div>
+
+            <div class="actions-group" id="manualActions">
+                <div class="search-box">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input type="text" id="searchInput" placeholder="搜索客户..." oninput="filterContacts()">
+                </div>
+                <!-- Mini Counter -->
+                <div style="font-size: 11px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; width: 68px; text-align: right;" id="contactCount">
+                    0/0
+                </div>
+                <button class="btn btn-ghost" id="btnFetch" onclick="fetchContacts()">提取</button>
+                <button class="btn btn-primary" onclick="createGroupForSelected()">
+                    批量建群
+                </button>
+            </div>
+        </header>
+        
+        <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
+
+        <!-- View 1: Manual -->
+        <div class="workspace-view active" id="view-manual">
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 48px; text-align: center;"><input type="checkbox" id="checkAll" onchange="toggleAll()"></th>
+                            <th>客户微信号 / 昵称</th>
+                            <th>客户特征</th>
+                            <th>处理状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="contactTable">
+                        <tr><td colspan="4" style="text-align:center; padding: 60px 0; font-size:13px; color: var(--text-tertiary);">← 左侧设置主理人并点击右上角「提取」</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- View 2: Auto -->
+        <div class="workspace-view" id="view-auto">
+            <div class="auto-view-center">
+                <div class="bot-ring" id="agentIcon">🕹️</div>
+                <h2 id="agentTitle">自动化引擎处于休眠状态</h2>
+                <p>启动后，系统将持续监听新客户，并在后台执行原生键盘鼠标模拟建群。</p>
+                <button class="btn btn-primary" style="padding: 10px 24px;" id="btnAgent" onclick="toggleAgent()">
+                    启动轮询 (60s)
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Script Logic (Identical functionality, updated bound IDs) -->
+    <script>
+        let members = [];
+        let contacts = [];
+        let logTimer = null;
+        let isLoadingContacts = false;
+
+        async function autoSave() { await saveSettings(); }
+
+        window.onload = async () => {
+            // 1. Test connection status
+            try {
+                const result = await window.go.main.App.TestConnection();
+                const pill = document.getElementById('statusPill');
+                if (result.includes('✅')) {
+                    pill.className = 'status-dot-wrap connected';
+                    document.getElementById('statusText').textContent = 'Online';
+                } else {
+                    document.getElementById('statusText').textContent = 'Offline';
+                }
+            } catch (e) {
+                document.getElementById('statusText').textContent = 'Error';
+                console.error('[TestConnection]', e);
+            }
+
+            // 2. Load members (independent - always try even if TestConnection failed)
+            try {
+                const rawMembers = await window.go.main.App.GetMembers();
+                console.log('[GetMembers] returned:', rawMembers ? rawMembers.length : 'null');
+                members = rawMembers || [];
+                if (members.length > 0) {
+                    console.log('[GetMembers] first member:', JSON.stringify(members[0]));
+                }
+                populateSelects();
+            } catch (e) {
+                console.error('[GetMembers ERROR]', e);
+                addLogLine('❌ 无法获取成员列表: ' + e);
+            }
+
+            // 3. Load saved settings (independent)
+            try {
+                const settings = await window.go.main.App.GetSettings();
+                if (settings && settings.target_userid) document.getElementById('selTarget').value = settings.target_userid;
+                if (settings && settings.fixed_members) {
+                    const sels = ['selF1', 'selF2', 'selF3'];
+                    settings.fixed_members.forEach((m, i) => {
+                        if (sels[i]) document.getElementById(sels[i]).value = m;
+                    });
+                }
+            } catch (e) {
+                console.error('[GetSettings]', e);
+            }
+
+            setupContactEvents();
+            logTimer = setInterval(refreshLogs, 1000);
+        };
+
+        function populateSelects() {
+            const ids = ['selTarget', 'selF1', 'selF2', 'selF3'];
+            ids.forEach(id => {
+                const sel = document.getElementById(id);
+                sel.innerHTML = '<option value="">-- 未选择 --</option>';
+                members.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.userid || m.UserID || '';
+                    opt.textContent = m.name || m.Name || '未知';
+                    if (opt.value) sel.appendChild(opt);
+                });
+            });
+        }
+
+        function setupContactEvents() {
+            if (!window.runtime) return;
+
+            window.runtime.EventsOn('contacts:loading', (data) => {
+                isLoadingContacts = true;
+                contacts = [];
+                document.getElementById('contactTable').innerHTML = '';
+                document.getElementById('searchInput').value = '';
+
+                document.getElementById('contactCount').textContent = '...';
+
+                const bar = document.getElementById('progressBar');
+                bar.className = 'progress-bar active indeterminate';
+                document.getElementById('progressFill').style.width = '30%';
+
+                const btn = document.getElementById('btnFetch');
+                btn.disabled = true;
+                btn.textContent = '加载中';
+            });
+
+            window.runtime.EventsOn('contacts:batch', (data) => {
+                if (!data) return;
+                const batch = data.contacts || [];
+                const loaded = data.loaded || 0;
+                const total = data.total || 0;
+
+                contacts = contacts.concat(batch);
+
+                const bar = document.getElementById('progressBar');
+                bar.className = 'progress-bar active';
+                const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+                document.getElementById('progressFill').style.width = pct + '%';
+
+                document.getElementById('contactCount').textContent = `${loaded}/${total}`;
+
+                const tbody = document.getElementById('contactTable');
+                const startIdx = contacts.length - batch.length;
+                batch.forEach((c, i) => {
+                    tbody.appendChild(createContactRow(c, startIdx + i));
+                });
+            });
+
+            window.runtime.EventsOn('contacts:done', (data) => {
+                isLoadingContacts = false;
+                const total = data.total || contacts.length;
+                document.getElementById('contactCount').textContent = `${total} 人`;
+                document.getElementById('progressBar').className = 'progress-bar';
+
+                const btn = document.getElementById('btnFetch');
+                btn.disabled = false;
+                btn.textContent = '提取';
+            });
+
+            window.runtime.EventsOn('contacts:error', (data) => {
+                isLoadingContacts = false;
+                document.getElementById('contactCount').textContent = 'Error';
+                document.getElementById('progressBar').className = 'progress-bar';
+                const btn = document.getElementById('btnFetch');
+                btn.disabled = false;
+                btn.textContent = '提取';
+            });
+        }
+
+        function createContactRow(c, idx) {
+            const isDone = (c.name || '').includes('✅');
+            const displayName = (c.name || '').replace(' ✅', '');
+            const typeText = c.type === 1 ? '普通用户' : '企业伙伴';
+            const tr = document.createElement('tr');
+            tr.dataset.name = displayName.toLowerCase();
+            tr.innerHTML = `
+                <td style="text-align: center;"><input type="checkbox" data-idx="${idx}" ${isDone ? 'disabled' : ''}></td>
+                <td style="font-weight: 500; display:flex; align-items:center; height: 35px;">
+                    <div style="width:20px; height:20px; background:rgba(255,255,255,0.05); border-radius:50%; margin-right:10px; display:flex; align-items:center; justify-content:center; font-size:10px;">👤</div>
+                    ${escapeHtml(displayName)}
+                </td>
+                <td><span style="border:1px solid var(--border-light); padding:2px 6px; border-radius:4px; font-size:10px; color:var(--text-tertiary);">${typeText}</span></td>
+                <td>
+                    <div class="status-cell" style="color: ${isDone ? 'var(--success)' : 'var(--text-tertiary)'}">
+                        <div class="dot ${isDone ? 'dot-done' : 'dot-pending'}"></div>
+                        ${isDone ? '已建群' : '未处理'}
+                    </div>
+                </td>
+            `;
+            return tr;
+        }
+
+        function filterContacts() {
+            const query = document.getElementById('searchInput').value.toLowerCase().trim();
+            const rows = document.querySelectorAll('#contactTable tr');
+            let visible = 0;
+            rows.forEach(row => {
+                const name = row.dataset.name || '';
+                if (!name) return;
+                if (!query || name.includes(query)) {
+                    row.style.display = '';
+                    visible++;
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+            if (query && contacts.length > 0) {
+                document.getElementById('contactCount').textContent = `${visible}/${contacts.length}`;
+            } else if (contacts.length > 0) {
+                document.getElementById('contactCount').textContent = `${contacts.length} 人`;
+            }
+        }
+
+        function switchTab(name) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.workspace-view').forEach(t => t.classList.remove('active'));
+            document.getElementById('view-' + name).classList.add('active');
+            event.target.classList.add('active');
+            // Toggle action bar visibility based on tab
+            document.getElementById('manualActions').style.display = name === 'manual' ? 'flex' : 'none';
+        }
+
+        async function saveSettings() {
+            const target = document.getElementById('selTarget').value;
+            const f1 = document.getElementById('selF1').value;
+            const f2 = document.getElementById('selF2').value;
+            const f3 = document.getElementById('selF3').value;
+            const fixedMembers = [f1, f2, f3].filter(x => x);
+            await window.go.main.App.SaveSettings(target, fixedMembers, '');
+        }
+
+        async function fetchContacts() {
+            if (isLoadingContacts) return;
+            const uid = document.getElementById('selTarget').value;
+            if (!uid) { alert('← 请在左侧面板先选择目标主理人'); return; }
+            await window.go.main.App.StartLoadContacts(uid);
+        }
+
+        function toggleAll() {
+            const checked = document.getElementById('checkAll').checked;
+            document.querySelectorAll('#contactTable input[type="checkbox"]:not(:disabled)')
+                .forEach(cb => cb.checked = checked);
+        }
+
+        async function createGroupForSelected() {
+            const checked = document.querySelectorAll('#contactTable input[type="checkbox"]:checked');
+            if (checked.length === 0) { alert('请至少勾选一个有效客户'); return; }
+            for (const cb of checked) {
+                const idx = parseInt(cb.dataset.idx);
+                const c = contacts[idx];
+                if (!c) continue;
+                const name = (c.name || '').replace(' ✅', '');
+                await window.go.main.App.CreateGroupForCustomer(name, c.external_userid);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+            fetchContacts();
+        }
+
+        async function toggleAgent() {
+            const running = await window.go.main.App.IsAgentRunning();
+            const pill = document.getElementById('statusPill');
+            const btn = document.getElementById('btnAgent');
+            
+            if (running) {
+                await window.go.main.App.StopAutoAgent();
+                btn.textContent = '启动轮询 (60s)';
+                btn.className = 'btn btn-primary';
+                document.getElementById('agentIcon').textContent = '🕹️';
+                document.getElementById('agentTitle').textContent = '自动化引擎处于休眠状态';
+                pill.className = 'status-dot-wrap connected';
+                document.getElementById('statusText').textContent = 'Online';
+            } else {
+                await saveSettings();
+                const result = await window.go.main.App.StartAutoAgent();
+                if (result.includes('❌')) { alert(result); return; }
+                btn.textContent = '强制中断任务';
+                btn.className = 'btn btn-ghost';
+                btn.style.color = 'var(--danger)';
+                btn.style.borderColor = 'var(--danger)';
+                document.getElementById('agentIcon').textContent = '⚡';
+                document.getElementById('agentTitle').textContent = '自动巡检执行中...';
+                pill.className = 'status-dot-wrap running';
+                document.getElementById('statusText').textContent = 'Active';
+            }
+        }
+
+        let lastLogCount = 0;
+        async function refreshLogs() {
+            try {
+                const logs = await window.go.main.App.GetLogs();
+                if (logs.length !== lastLogCount) {
+                    const area = document.getElementById('logArea');
+                    area.innerHTML = logs.map(l => {
+                        const timeStr = new Date().toLocaleTimeString('en-US', {hour12: false});
+                        return `<div class="log-line"><span class="time">[${timeStr}]</span>${escapeHtml(l)}</div>`;
+                    }).join('');
+                    area.scrollTop = area.scrollHeight;
+                    lastLogCount = logs.length;
+                }
+            } catch(e) {}
+        }
+
+        function clearLogs() {
+            document.getElementById('logArea').innerHTML = '';
+            lastLogCount = 0;
+        }
+
+        function addLogLine(text) {
+            const area = document.getElementById('logArea');
+            const timeStr = new Date().toLocaleTimeString('en-US', {hour12: false});
+            area.innerHTML += `<div class="log-line"><span class="time">[${timeStr}]</span>${escapeHtml(text)}</div>`;
+            area.scrollTop = area.scrollHeight;
+        }
+
+        function escapeHtml(s) {
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+    </script>
+</body>
+</html>
