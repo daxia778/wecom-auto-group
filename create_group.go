@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"image"
-	"image/png"
 	"math/rand"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -323,307 +321,241 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 	return result
 }
 
-// setupGroupPrivacy 设置群管理: 禁止互加好友
+// setupGroupPrivacy 设置群管理隐私: 勾选「禁止互相添加为联系人」
 //
-// 实际 UI 流程 (基于截图验证 2026-04-18):
-//   点 ··· (聊天区标题栏右侧) → 右侧滑出「聊天信息」面板
-//   → 面板内直接可见「群管理」→ 点击进入
-//   → 弹出 Chromium overlay 模态框
-//   → 勾选「禁止互相添加为联系人」→ 二次验证 → 关闭
+// 架构 (2025-04-18 重构):
+//   Phase A: 打开群管理窗口 (主窗口操作)
+//     - SendMessage 后台点击 ··· 和 群管理
+//     - 失败时 SafeRealClick 重试 (短暂抢鼠标)
+//     - 等待 ExternalConversationManagerWindow 出现
 //
-// 技术要点:
-//   ··· 按钮、右侧面板、overlay 全部是 Chromium 渲染
-//   → PrintWindow (后台) 截不到 → 必须用 BitBlt 前台截图
-//   → SendMessage 后台点击无效 → 必须用 SafeRealClick 硬件级点击
-//   → Step 1/2 用前台截图+OCR 精确定位 (坐标在不同窗口尺寸下不可靠)
-//   → Step 3 用前台截图+OCR 找 checkbox
+//   Phase B: 操作群管理窗口 (100% 后台静默!)
+//     - 群管理窗口是独立原生 Win32 窗口, 非 Chromium overlay
+//     - PrintWindow 后台截图 ✅ (不需要前台)
+//     - SendMessage 后台点击 ✅ (不抢鼠标)
+//     - WM_CLOSE 后台关闭 ✅
+//
+//   Phase C: 收起面板
 func (w *WeComWindow) setupGroupPrivacy(logFn func(string)) (privacySet bool, privacyVerified bool) {
 
-	// ═══ Step 1: 点击 ··· 打开右侧「聊天信息」面板 ═══
-	// ··· 是图标,OCR 通常识别不到
-	// 正确位置: 聊天区标题栏最右端 (紧挨 人头图标 左侧)
-	//   x = 窗口宽度 - 45 (固定在右端)
-	//   y = 群名文字同一行 (标题栏第一行, NOT 副标题行!)
-	logFn("       [隐私] Step1: 定位 ··· 按钮...")
-	dotsClicked := false
+	// ═══ Phase A: 打开群管理窗口 ═══
+	logFn("       [隐私] Phase A: 打开群管理窗口...")
 
-	fgItems0, fgErr0 := w.OCRScanForeground()
-	if fgErr0 == nil && len(fgItems0) > 0 {
-		maxY := int(float64(w.Height) * 0.10)
-
-		// 策略 A: OCR 直接识别到 ··· 文字 (罕见)
-		var dotsBtn *OCRItem
-		for idx := range fgItems0 {
-			it := &fgItems0[idx]
-			if it.CY > maxY || it.CX < int(float64(w.Width)*0.50) {
-				continue
-			}
-			txt := strings.TrimSpace(it.Text)
-			if len([]rune(txt)) <= 4 && (txt == "···" || txt == "..." || txt == "…" || txt == ".." || txt == "·..") {
-				dotsBtn = it
-				break
-			}
-		}
-
-		if dotsBtn != nil {
-			logFn(fmt.Sprintf("       [隐私] OCR 直接找到 ··· (%d,%d)", dotsBtn.CX, dotsBtn.CY))
-			w.SafeRealClick(dotsBtn.CX, dotsBtn.CY)
-			dotsClicked = true
-		}
-
-		// 策略 B: 找聊天标题栏第一行文字 → 取其 y 坐标 → ··· 在 (width-45, y)
-		// ⚠️ 必须选最小 y 的文字 (群名第一行), 不能选最长的 (那是副标题!)
-		if !dotsClicked {
-			var headerItem *OCRItem
-			for idx := range fgItems0 {
-				it := &fgItems0[idx]
-				// 聊天区标题: x > 25% (排除侧栏), y 在 30~maxY (排除自定义标题栏)
-				if it.CX > int(float64(w.Width)*0.25) && it.CY < maxY && it.CY > 30 {
-					if it.Text == "搜索" || it.Text == "十" || it.Text == "+" || it.Text == "×" {
-						continue
-					}
-					// ⚠️ 选 y 最小的 (第一行=群名), 不选最长的 (可能是副标题!)
-					if headerItem == nil || it.CY < headerItem.CY {
-						headerItem = it
-					}
-				}
-			}
-			if headerItem != nil {
-				// ··· 在标题栏最右端, x 固定在窗口右侧
-				dotsX := w.Width - 45
-				dotsY := headerItem.CY
-				logFn(fmt.Sprintf("       [隐私] 标题行「%s」y=%d → ··· (%d,%d)",
-					headerItem.Text, headerItem.CY, dotsX, dotsY))
-				w.SafeRealClick(dotsX, dotsY)
-				dotsClicked = true
-			}
-		}
-
-		if !dotsClicked {
-			var topTexts []string
-			for _, it := range fgItems0 {
-				if it.CY < maxY {
-					topTexts = append(topTexts, fmt.Sprintf("%s@(%d,%d)", it.Text, it.CX, it.CY))
-				}
-			}
-			logFn(fmt.Sprintf("       [隐私] ⚠️ OCR 未能推算 ···, 顶部: %v", topTexts))
-		}
+	// 先检查群管理窗口是否已打开
+	mgmtHwnd := privFindGroupMgmtWindow(w.Pid)
+	if mgmtHwnd != 0 {
+		logFn(fmt.Sprintf("       [隐私] 群管理窗口已打开 (HWND=0x%X)", mgmtHwnd))
 	} else {
-		logFn(fmt.Sprintf("       [隐私] ⚠️ 前台 OCR 失败: %v", fgErr0))
-	}
-
-	if !dotsClicked {
-		// 固定回退: 标题栏右端, y=群名行高度
-		rx := w.Width - 45
-		ry := int(float64(w.Height) * 0.06)
-		logFn(fmt.Sprintf("       [隐私] 坐标回退 ··· (%d,%d)", rx, ry))
-		w.SafeRealClick(rx, ry)
-	}
-	humanDelay(2500, 500)
-
-	// 关闭意外弹窗
-	if w.isPopupVisible(popupClass) {
-		w.ClosePopup(popupClass)
-		humanDelay(1000, 300)
-	}
-
-	// ═══ Step 2: 点击「群管理」(右侧面板内) ═══
-	// 用前台截图 + OCR 精确定位 (面板是 Chromium, PrintWindow 看不到)
-	logFn("       [隐私] Step2: 定位「群管理」...")
-	mgmtClicked := false
-
-	fgItems2, fgErr2 := w.OCRScanForeground()
-	if fgErr2 == nil && len(fgItems2) > 0 {
-		panelX := int(float64(w.Width) * 0.50)
-		var mgmtBtn *OCRItem
-		for idx := range fgItems2 {
-			if fgItems2[idx].CX > panelX && strings.Contains(fgItems2[idx].Text, "群管理") {
-				mgmtBtn = &fgItems2[idx]
-				break
-			}
-		}
-		if mgmtBtn != nil {
-			logFn(fmt.Sprintf("       [隐私] OCR 定位「群管理」(%d,%d)", mgmtBtn.CX, mgmtBtn.CY))
-			w.SafeRealClick(mgmtBtn.CX, mgmtBtn.CY)
-			mgmtClicked = true
-		} else {
-			var panelTexts []string
-			for _, it := range fgItems2 {
-				if it.CX > panelX {
-					panelTexts = append(panelTexts, it.Text)
-				}
-			}
-			logFn(fmt.Sprintf("       [隐私] ⚠️ OCR 未匹配「群管理」, 面板: %v", panelTexts))
+		mgmtHwnd = w.openGroupMgmtDialog(logFn)
+		if mgmtHwnd == 0 {
+			logFn("       [隐私] ❌ 无法打开群管理窗口")
+			return false, false
 		}
 	}
 
-	if !mgmtClicked {
-		fx := int(float64(w.Width) * 0.82)
-		fy := int(float64(w.Height) * 0.37)
-		logFn(fmt.Sprintf("       [隐私] 坐标回退「群管理」(%d,%d)", fx, fy))
-		w.SafeRealClick(fx, fy)
+	// ═══ Phase B: 100% 后台操作 checkbox ═══
+	logFn("       [隐私] Phase B: 后台操作 checkbox (PrintWindow + SendMessage)...")
+
+	// B1: 后台截图群管理窗口
+	mgmtImg, mgmtPng, mgmtErr := w.screenshotHwnd(mgmtHwnd)
+	if mgmtErr != nil {
+		logFn(fmt.Sprintf("       [隐私] ❌ 群管理窗口截图失败: %v", mgmtErr))
+		w.closeGroupMgmt(mgmtHwnd, logFn)
+		return false, false
 	}
+	logFn(fmt.Sprintf("       [隐私] ✅ 后台截图成功 (%.0fKB)", float64(len(mgmtPng))/1024))
 
-	// ═══ Step 3: 等 overlay 加载 → 前台截图 → 找 checkbox ═══
-	logFn("       [隐私] Step3: 等待群管理弹窗...")
-	humanDelay(2500, 500) // Chromium overlay 需要时间渲染
-
-	// 前台截图 (BitBlt) — overlay 是 Chromium 渲染, PrintWindow 抓不到
-	// 使用 SafeScreenshotForeground 加锁保护
-	fgImg, _, fgErr := w.SafeScreenshotForeground()
-	if fgErr != nil {
-		logFn(fmt.Sprintf("       [隐私] ❌ 前台截图失败: %v", fgErr))
-		// 点击聊天区收起面板 (不用 ESC, ESC 会关闭企微窗口!)
-		w.Click(int(float64(w.Width)*0.45), int(float64(w.Height)*0.50))
+	// B2: OCR 定位 checkbox
+	items, ocrErr := ZhipuOCR(mgmtPng)
+	if ocrErr != nil {
+		logFn(fmt.Sprintf("       [隐私] ❌ OCR 失败: %v", ocrErr))
+		w.closeGroupMgmt(mgmtHwnd, logFn)
 		return false, false
 	}
 
-	fgItems, checkX, checkY, found := w.findPrivacyCheckbox(fgImg, logFn)
-	if !found {
-		// 关闭 overlay
-		w.SafeRealClick(int(float64(w.Width)*0.15), int(float64(w.Height)*0.5))
-		humanDelay(500, 200)
-		// 点击聊天区收起面板 (不用 ESC!)
-		w.Click(int(float64(w.Width)*0.45), int(float64(w.Height)*0.50))
+	target := privFindCheckboxText(items)
+	if target == nil {
+		logFn("       [隐私] ❌ OCR 未找到「禁止互相添加为联系人」")
+		w.closeGroupMgmt(mgmtHwnd, logFn)
 		return false, false
 	}
 
-	// ═══ Step 4: 检查状态 → 点击 → 二次验证 ═══
-	if IsCheckboxChecked(fgImg, checkX, checkY) {
+	checkX := target.X1 - 20
+	checkY := target.CY
+	logFn(fmt.Sprintf("       [隐私] 定位 checkbox (%d,%d) [%s]", checkX, checkY, target.Text))
+
+	// B3: 检查当前状态
+	if mgmtImg != nil && IsCheckboxChecked(mgmtImg, checkX, checkY) {
 		logFn("       [隐私] ✅ 已勾选, 无需操作")
 		privacySet = true
-		privacyVerified = true // 经过像素检测确认
+		privacyVerified = true
 	} else {
-		// 点击并验证 (最多 3 次)
-		for attempt := 0; attempt < 3; attempt++ {
-			logFn(fmt.Sprintf("       [隐私] 点击勾选 (%d,%d) [尝试 %d/3]", checkX, checkY, attempt+1))
-			w.SafeRealClick(checkX, checkY)
+		// B4: SendMessage 后台点击 (多偏移尝试)
+		offsets := []int{0, -5, -10, 5, -15, 10, -25}
+		for attempt, dx := range offsets {
+			tryX := checkX + dx
+			logFn(fmt.Sprintf("       [隐私] 后台点击 (%d,%d) [尝试 %d/%d]",
+				tryX, checkY, attempt+1, len(offsets)))
+			privClickOnWindow(mgmtHwnd, tryX, checkY)
 			humanDelay(800, 200)
 
-			// 二次验证: 重新前台截图 + 像素检测
-			verifyImg, _, verifyErr := w.SafeScreenshotForeground()
+			// 后台截图验证
+			verifyImg, _, verifyErr := w.screenshotHwnd(mgmtHwnd)
 			if verifyErr != nil {
 				logFn(fmt.Sprintf("       [隐私] ⚠️ 验证截图失败: %v", verifyErr))
 				continue
 			}
 
-			if IsCheckboxChecked(verifyImg, checkX, checkY) {
-				logFn("       [隐私] ✅ 二次验证: checkbox 已勾选")
+			if IsCheckboxChecked(verifyImg, tryX, checkY) {
+				logFn("       [隐私] ✅ 后台验证通过! checkbox 已勾选")
 				privacySet = true
 				privacyVerified = true
 				break
 			}
-
-			// 验证失败, 可能坐标偏了, 尝试微调
-			if attempt < 2 {
-				logFn(fmt.Sprintf("       [隐私] ⚠️ 验证失败 (尝试 %d/3), 微调坐标重试...", attempt+1))
-				// 微调: 左移 5px (checkbox 可能在文字更左边)
-				checkX -= 5
-			}
 		}
 
 		if !privacyVerified {
-			logFn("       [隐私] ❌ 3 次尝试均未能确认勾选, 需人工复核")
+			logFn("       [隐私] ⚠️ 多次尝试后未确认勾选, 需人工复核")
 		}
 	}
 
-	// ═══ 关闭: overlay × 按钮 → ESC 收起面板 ═══
-	w.closeOverlay(fgItems, logFn)
+	// ═══ Phase C: 关闭群管理 + 收起面板 ═══
+	w.closeGroupMgmt(mgmtHwnd, logFn)
 
 	return privacySet, privacyVerified
 }
 
-// findPrivacyCheckbox 在前台截图中查找「禁止互相添加为联系人」checkbox 位置
-// 返回: (ocrItems, checkX, checkY, found)
-func (w *WeComWindow) findPrivacyCheckbox(fgImg image.Image, logFn func(string)) ([]OCRItem, int, int, bool) {
-	var buf bytes.Buffer
-	png.Encode(&buf, fgImg)
-	fgItems, ocrErr := ZhipuOCR(buf.Bytes())
-	if ocrErr != nil {
-		logFn(fmt.Sprintf("       [隐私] ❌ OCR 失败: %v", ocrErr))
-		return nil, 0, 0, false
-	}
+// openGroupMgmtDialog 打开群管理对话框
+// 先尝试 SendMessage 后台点击, 失败则 SafeRealClick
+// 返回群管理窗口的 HWND, 0 表示失败
+func (w *WeComWindow) openGroupMgmtDialog(logFn func(string)) syscall.Handle {
+	scaleX := float64(w.Width) / refW
+	scaleY := float64(w.Height) / refH
 
-	// 打印 OCR 结果
-	var allTexts []string
-	for _, it := range fgItems {
-		allTexts = append(allTexts, it.Text)
-	}
-	logFn(fmt.Sprintf("       [隐私] 弹窗 OCR(%d项): %v", len(fgItems), allTexts))
+	// 尝试 OCR 定位 ··· 和 群管理
+	var dotsX, dotsY int
+	var mgmtX, mgmtY int
+	ocrOK := false
 
-	// 搜索「禁止互相添加为联系人」
-	keywords := []string{
-		"禁止互相添加为联系人", "禁止互相添加",
-		"互相添加为联系人", "禁止互加", "互加好友",
-		"添加为联系人",
-	}
+	_, mainPng, mainErr := w.Screenshot()
+	if mainErr == nil && len(mainPng) > 10000 {
+		items, ocrErr := ZhipuOCR(mainPng)
+		if ocrErr == nil && len(items) > 0 {
+			logFn(fmt.Sprintf("       [隐私] OCR 定位成功 (%d项)", len(items)))
+			ocrOK = true
 
-	var toggleBtn *OCRItem
-	for _, kw := range keywords {
-		// 精确匹配
-		match := FindOCRText(fgItems, kw)
-		if match != nil {
-			toggleBtn = match
-			break
+			// 检查面板是否已打开
+			for idx := range items {
+				if strings.Contains(items[idx].Text, "群管理") && items[idx].CX > w.Width/2 {
+					mgmtX, mgmtY = items[idx].CX, items[idx].CY
+					logFn(fmt.Sprintf("       [隐私] OCR 找到「群管理」(%d,%d)", mgmtX, mgmtY))
+					break
+				}
+			}
+
+			if mgmtX == 0 {
+				dotsX = w.Width - 50
+				dotsY = 47
+				headerY := privFindHeaderY(items, w.Width, w.Height)
+				if headerY > 0 {
+					dotsY = headerY
+				}
+			}
 		}
-		// 子串匹配 (最长不超过 30 字)
+	}
+
+	if !ocrOK {
+		dotsX = w.Width - int(50*scaleX)
+		dotsY = int(47 * scaleY)
+	}
+
+	// 先尝试 SendMessage 后台点击
+	if mgmtX == 0 {
+		logFn(fmt.Sprintf("       [隐私] SendMessage 点击 ··· (%d,%d)", dotsX, dotsY))
+		w.Click(dotsX, dotsY)
+		humanDelay(1500, 300)
+
+		// 再次截图找群管理
+		_, panelPng, panelErr := w.Screenshot()
+		if panelErr == nil && len(panelPng) > 10000 {
+			items2, err2 := ZhipuOCR(panelPng)
+			if err2 == nil {
+				for idx := range items2 {
+					if strings.Contains(items2[idx].Text, "群管理") && items2[idx].CX > w.Width/2 {
+						mgmtX, mgmtY = items2[idx].CX, items2[idx].CY
+						break
+					}
+				}
+			}
+		}
+		if mgmtX == 0 {
+			mgmtX = int(float64(w.Width) * 0.82)
+			mgmtY = int(float64(w.Height) * 0.39)
+		}
+	}
+
+	logFn(fmt.Sprintf("       [隐私] SendMessage 点击「群管理」(%d,%d)", mgmtX, mgmtY))
+	w.Click(mgmtX, mgmtY)
+
+	// 等待 ExternalConversationManagerWindow 出现
+	for wait := 0; wait < 10; wait++ {
+		humanDelay(500, 100)
+		hwnd := privFindGroupMgmtWindow(w.Pid)
+		if hwnd != 0 {
+			logFn(fmt.Sprintf("       [隐私] ✅ 群管理窗口出现 (HWND=0x%X, %dms)", hwnd, (wait+1)*500))
+			return hwnd
+		}
+	}
+
+	// SendMessage 失败, 用 SafeRealClick 重试
+	logFn("       [隐私] SendMessage 无效, 改用 SafeRealClick...")
+
+	w.SafeRealClick(dotsX, dotsY)
+	humanDelay(1500, 300)
+
+	// 前台 OCR 定位群管理
+	fgItems, fgErr := w.OCRScanForeground()
+	if fgErr == nil && len(fgItems) > 0 {
 		for idx := range fgItems {
-			if strings.Contains(fgItems[idx].Text, kw) && len([]rune(fgItems[idx].Text)) <= 30 {
-				toggleBtn = &fgItems[idx]
-				break
-			}
-		}
-		if toggleBtn != nil {
-			break
-		}
-	}
-
-	if toggleBtn == nil {
-		logFn("       [隐私] ❌ 未找到「禁止互相添加为联系人」")
-		return fgItems, 0, 0, false
-	}
-
-	// 计算 checkbox 坐标
-	txt := toggleBtn.Text
-	checkX := toggleBtn.X1 - 15
-	checkY := toggleBtn.CY
-
-	// 如果 OCR 把 checkbox 标签连在文字里, 按比例计算真实 checkbox 位置
-	txtRunes := []rune(txt)
-	for _, kw := range []string{"禁止互相", "禁止互加", "互加好友"} {
-		kwRunes := []rune(kw)
-		for j := 0; j+len(kwRunes) <= len(txtRunes); j++ {
-			if string(txtRunes[j:j+len(kwRunes)]) == kw && j > 0 {
-				textWidth := toggleBtn.X2 - toggleBtn.X1
-				ratio := float64(j) / float64(len(txtRunes))
-				checkX = toggleBtn.X1 + int(float64(textWidth)*ratio) - 5
+			if strings.Contains(fgItems[idx].Text, "群管理") && fgItems[idx].CX > w.Width/2 {
+				mgmtX, mgmtY = fgItems[idx].CX, fgItems[idx].CY
+				logFn(fmt.Sprintf("       [隐私] 前台 OCR 定位「群管理」(%d,%d)", mgmtX, mgmtY))
 				break
 			}
 		}
 	}
 
-	logFn(fmt.Sprintf("       [隐私] 定位 checkbox (%d,%d) [%s]", checkX, checkY, txt))
-	return fgItems, checkX, checkY, true
+	w.SafeRealClick(mgmtX, mgmtY)
+
+	for wait := 0; wait < 10; wait++ {
+		humanDelay(500, 100)
+		hwnd := privFindGroupMgmtWindow(w.Pid)
+		if hwnd != 0 {
+			logFn(fmt.Sprintf("       [隐私] ✅ 群管理窗口出现 (HWND=0x%X)", hwnd))
+			return hwnd
+		}
+	}
+
+	logFn("       [隐私] ❌ 群管理窗口未出现")
+	// 收起面板
+	w.Click(int(float64(w.Width)*0.45), int(float64(w.Height)*0.50))
+	return 0
 }
 
-// closeOverlay 关闭群管理 overlay + 点击聊天区收起面板
-func (w *WeComWindow) closeOverlay(fgItems []OCRItem, logFn func(string)) {
-	closed := false
-	closeBtn := FindOCRText(fgItems, "×")
-	if closeBtn == nil {
-		closeBtn = FindOCRText(fgItems, "x")
-	}
-	if closeBtn != nil {
-		logFn(fmt.Sprintf("       [隐私] 关闭 × (%d,%d)", closeBtn.CX, closeBtn.CY))
-		w.SafeRealClick(closeBtn.CX, closeBtn.CY)
-		closed = true
-	}
-	if !closed {
-		w.SafeRealClick(int(float64(w.Width)*0.15), int(float64(w.Height)*0.5))
-	}
+// closeGroupMgmt 关闭群管理窗口 + 收起聊天信息面板
+func (w *WeComWindow) closeGroupMgmt(mgmtHwnd syscall.Handle, logFn func(string)) {
+	// WM_CLOSE 后台关闭群管理窗口
+	const WM_CLOSE = 0x0010
+	procSendMessage.Call(uintptr(mgmtHwnd), WM_CLOSE, 0, 0)
 	humanDelay(800, 200)
+
+	if privFindGroupMgmtWindow(w.Pid) != 0 {
+		procSendMessage.Call(uintptr(mgmtHwnd), WM_CLOSE, 0, 0)
+		humanDelay(500, 100)
+	}
 
 	// 点击聊天区空白处收起右侧面板 (绝对不发 ESC, ESC 会关闭企微窗口!)
 	w.Click(int(float64(w.Width)*0.45), int(float64(w.Height)*0.50))
 	humanDelay(500, 200)
 }
+
