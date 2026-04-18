@@ -3,9 +3,12 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -338,7 +341,15 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 //   Phase C: 收起面板
 func (w *WeComWindow) setupGroupPrivacy(logFn func(string)) (privacySet bool, privacyVerified bool) {
 
+	// 调试截图目录
+	debugDir := filepath.Join(os.Getenv("APPDATA"), "WeComAutoGroup", "debug_privacy")
+	os.MkdirAll(debugDir, 0755)
+
 	// ═══ Phase A: 打开群管理窗口 ═══
+	// 建群完成后等待 5 秒让企微渲染新群聊界面
+	logFn("       [隐私] 等待群聊界面渲染 (5s)...")
+	humanDelay(5000, 500)
+
 	logFn("       [隐私] Phase A: 打开群管理窗口...")
 
 	// 先检查群管理窗口是否已打开
@@ -346,7 +357,7 @@ func (w *WeComWindow) setupGroupPrivacy(logFn func(string)) (privacySet bool, pr
 	if mgmtHwnd != 0 {
 		logFn(fmt.Sprintf("       [隐私] 群管理窗口已打开 (HWND=0x%X)", mgmtHwnd))
 	} else {
-		mgmtHwnd = w.openGroupMgmtDialog(logFn)
+		mgmtHwnd = w.openGroupMgmtDialog(logFn, debugDir)
 		if mgmtHwnd == 0 {
 			logFn("       [隐私] ❌ 无法打开群管理窗口")
 			return false, false
@@ -363,6 +374,7 @@ func (w *WeComWindow) setupGroupPrivacy(logFn func(string)) (privacySet bool, pr
 		w.closeGroupMgmt(mgmtHwnd, logFn)
 		return false, false
 	}
+	os.WriteFile(filepath.Join(debugDir, "phase_b_mgmt.png"), mgmtPng, 0644)
 	logFn(fmt.Sprintf("       [隐私] ✅ 后台截图成功 (%.0fKB)", float64(len(mgmtPng))/1024))
 
 	// B2: OCR 定位 checkbox
@@ -400,11 +412,12 @@ func (w *WeComWindow) setupGroupPrivacy(logFn func(string)) (privacySet bool, pr
 			humanDelay(800, 200)
 
 			// 后台截图验证
-			verifyImg, _, verifyErr := w.screenshotHwnd(mgmtHwnd)
+			verifyImg, verifyPng, verifyErr := w.screenshotHwnd(mgmtHwnd)
 			if verifyErr != nil {
 				logFn(fmt.Sprintf("       [隐私] ⚠️ 验证截图失败: %v", verifyErr))
 				continue
 			}
+			os.WriteFile(filepath.Join(debugDir, fmt.Sprintf("phase_b_verify_%d.png", attempt+1)), verifyPng, 0644)
 
 			if IsCheckboxChecked(verifyImg, tryX, checkY) {
 				logFn("       [隐私] ✅ 后台验证通过! checkbox 已勾选")
@@ -425,132 +438,159 @@ func (w *WeComWindow) setupGroupPrivacy(logFn func(string)) (privacySet bool, pr
 	return privacySet, privacyVerified
 }
 
-// openGroupMgmtDialog 打开群管理对话框
-// 使用前台 OCR + SafeRealClick (原始验证过的方案)
-// 打开后等待 ExternalConversationManagerWindow 出现
-// 返回群管理窗口的 HWND, 0 表示失败
-func (w *WeComWindow) openGroupMgmtDialog(logFn func(string)) syscall.Handle {
+// openGroupMgmtDialog 打开群管理对话框 (v7)
+//
+// 核心发现 (来自交互测试 2025-04-18):
+//   - ··· 按钮必须用 SendMessage (Click) 点击, 坐标 w*0.945, h*0.04
+//   - SafeRealClick 点击 ··· 只会 toggle 成员面板, 不会打开聊天信息面板!
+//   - 「群管理」行也用 SendMessage 点击 (OCR精确定位坐标)
+//   - 群管理打开后创建 ExternalConversationManagerWindow 子窗口
+//   - Phase B 可以 100% 后台操作该子窗口
+//
+// 流程:
+//   1. 拉高窗口 (确保聊天信息面板能完整显示群管理)
+//   2. SendMessage 点击 ··· (w*0.945, h*0.04) 打开聊天信息面板
+//   3. 前台截图 + OCR 精确定位「群管理」坐标
+//   4. SendMessage 点击「群管理」→ 等待 ExternalConversationManagerWindow
+//   5. 恢复窗口尺寸
+func (w *WeComWindow) openGroupMgmtDialog(logFn func(string), debugDir string) syscall.Handle {
 
-	// ──── Step 1: 前台 OCR 定位 ··· 按钮 ────
-	logFn("       [隐私] Step1: 定位 ··· 按钮...")
-	dotsClicked := false
+	// ──── Step 1: 拉高窗口 ────
+	logFn("       [隐私] 拉高窗口以显示完整面板...")
+	smH, _, _ := user32.NewProc("GetSystemMetrics").Call(1) // SM_CYSCREEN
+	screenH := int(smH)
 
-	fgItems0, fgErr0 := w.OCRScanForeground()
-	if fgErr0 == nil && len(fgItems0) > 0 {
-		maxY := int(float64(w.Height) * 0.10)
+	var wr RECT
+	procGetWindowRect.Call(uintptr(w.Hwnd), uintptr(unsafe.Pointer(&wr)))
+	origLeft := int(wr.Left)
+	origTop := int(wr.Top)
+	origW := int(wr.Right - wr.Left)
+	origH := int(wr.Bottom - wr.Top)
 
-		// 策略 A: OCR 直接识别 ··· 文字 (罕见)
-		var dotsBtn *OCRItem
-		for idx := range fgItems0 {
-			it := &fgItems0[idx]
-			if it.CY > maxY || it.CX < int(float64(w.Width)*0.50) {
-				continue
-			}
-			txt := strings.TrimSpace(it.Text)
-			if len([]rune(txt)) <= 4 && (txt == "···" || txt == "..." || txt == "…" || txt == ".." || txt == "·..") {
-				dotsBtn = it
-				break
-			}
+	if origH < screenH-100 {
+		newH := screenH - 40
+		newTop := 20
+		logFn(fmt.Sprintf("       [隐私] 窗口 %d×%d → %d×%d", origW, origH, origW, newH))
+		procSetWindowPos.Call(uintptr(w.Hwnd), 0,
+			uintptr(origLeft), uintptr(newTop), uintptr(origW), uintptr(newH),
+			SWP_NOACTIVATE)
+		time.Sleep(800 * time.Millisecond)
+
+		var cr RECT
+		procGetClientRect.Call(uintptr(w.Hwnd), uintptr(unsafe.Pointer(&cr)))
+		w.Width = int(cr.Right)
+		w.Height = int(cr.Bottom)
+		logFn(fmt.Sprintf("       [隐私] 新客户区: %d×%d", w.Width, w.Height))
+	}
+
+	// 确保无论成功失败都恢复窗口尺寸
+	defer func() {
+		if origH < screenH-100 {
+			procSetWindowPos.Call(uintptr(w.Hwnd), 0,
+				uintptr(origLeft), uintptr(origTop), uintptr(origW), uintptr(origH),
+				SWP_NOACTIVATE)
+			time.Sleep(300 * time.Millisecond)
+			var cr RECT
+			procGetClientRect.Call(uintptr(w.Hwnd), uintptr(unsafe.Pointer(&cr)))
+			w.Width = int(cr.Right)
+			w.Height = int(cr.Bottom)
 		}
-		if dotsBtn != nil {
-			logFn(fmt.Sprintf("       [隐私] OCR 直接找到 ··· (%d,%d)", dotsBtn.CX, dotsBtn.CY))
-			w.SafeRealClick(dotsBtn.CX, dotsBtn.CY)
-			dotsClicked = true
+	}()
+
+	// ──── Step 2: SendMessage 点击 ··· 打开聊天信息面板 ────
+	// Python 版坐标: w*0.945, h*0.04 — 交互测试验证有效
+	dotsX := int(float64(w.Width) * 0.945)
+	dotsY := int(float64(w.Height) * 0.04)
+	logFn(fmt.Sprintf("       [隐私] SendMessage 点击 ··· @(%d,%d)", dotsX, dotsY))
+	w.Click(dotsX, dotsY)
+	humanDelay(2000, 500)
+
+	// ──── Step 3: 截图 + OCR 找「群管理」 ────
+	for attempt := 0; attempt < 3; attempt++ {
+		logFn(fmt.Sprintf("       [隐私] 截图寻找「群管理」(尝试 %d/3)...", attempt+1))
+
+		_, panelPng, panelErr := w.SafeScreenshotForeground()
+		if panelErr != nil || len(panelPng) <= 10000 {
+			_, panelPng, panelErr = w.Screenshot()
+		}
+		if panelErr != nil || len(panelPng) <= 10000 {
+			logFn("       [隐私] ⚠️ 截图失败")
+			humanDelay(1000, 200)
+			continue
+		}
+		fname := fmt.Sprintf("step_panel_%d.png", attempt+1)
+		os.WriteFile(filepath.Join(debugDir, fname), panelPng, 0644)
+
+		panelItems, ocrErr := ZhipuOCR(panelPng)
+		if ocrErr != nil {
+			logFn(fmt.Sprintf("       [隐私] ⚠️ OCR 失败: %v", ocrErr))
+			continue
 		}
 
-		// 策略 B: 找聊天标题栏第一行文字 → 取其 y → ··· 在 (width-45, y)
-		if !dotsClicked {
-			var headerItem *OCRItem
-			for idx := range fgItems0 {
-				it := &fgItems0[idx]
-				if it.CX > int(float64(w.Width)*0.25) && it.CY < maxY && it.CY > 30 {
-					if it.Text == "搜索" || it.Text == "十" || it.Text == "+" || it.Text == "×" {
-						continue
-					}
-					if headerItem == nil || it.CY < headerItem.CY {
-						headerItem = it
-					}
+		// 查找聊天信息面板中的「群管理」
+		panelX := w.Width / 2
+		var mgmtItem *OCRItem
+		for idx := range panelItems {
+			if panelItems[idx].CX > panelX && strings.Contains(panelItems[idx].Text, "群管理") {
+				// 排除 "群管理员" 等误匹配
+				txt := panelItems[idx].Text
+				if txt == "群管理" || txt == "群管理 >" || txt == "群管理>" {
+					mgmtItem = &panelItems[idx]
+					break
 				}
 			}
-			if headerItem != nil {
-				dotsX := w.Width - 45
-				dotsY := headerItem.CY
-				logFn(fmt.Sprintf("       [隐私] 标题行「%s」y=%d → ··· (%d,%d)",
-					headerItem.Text, headerItem.CY, dotsX, dotsY))
-				w.SafeRealClick(dotsX, dotsY)
-				dotsClicked = true
-			}
 		}
-	} else {
-		logFn(fmt.Sprintf("       [隐私] ⚠️ 前台 OCR 失败: %v", fgErr0))
-	}
 
-	// 坐标回退
-	if !dotsClicked {
-		rx := w.Width - 45
-		ry := int(float64(w.Height) * 0.06)
-		logFn(fmt.Sprintf("       [隐私] 坐标回退 ··· (%d,%d)", rx, ry))
-		w.SafeRealClick(rx, ry)
-	}
-	humanDelay(2500, 500)
+		if mgmtItem != nil {
+			logFn(fmt.Sprintf("       [隐私] ✅ 「%s」@(%d,%d) — SendMessage 点击", mgmtItem.Text, mgmtItem.CX, mgmtItem.CY))
+			w.Click(mgmtItem.CX, mgmtItem.CY)
+			humanDelay(2000, 500)
 
-	// 关闭意外弹窗
-	if w.isPopupVisible(popupClass) {
-		w.ClosePopup(popupClass)
-		humanDelay(1000, 300)
-	}
-
-	// ──── Step 2: 前台 OCR 定位「群管理」────
-	logFn("       [隐私] Step2: 定位「群管理」...")
-	mgmtClicked := false
-	var mgmtX, mgmtY int
-
-	fgItems2, fgErr2 := w.OCRScanForeground()
-	if fgErr2 == nil && len(fgItems2) > 0 {
-		panelX := int(float64(w.Width) * 0.50)
-		var mgmtBtn *OCRItem
-		for idx := range fgItems2 {
-			if fgItems2[idx].CX > panelX && strings.Contains(fgItems2[idx].Text, "群管理") {
-				mgmtBtn = &fgItems2[idx]
-				break
+			// 等待群管理窗口
+			for wait := 0; wait < 10; wait++ {
+				humanDelay(500, 100)
+				hwnd := privFindGroupMgmtWindow(w.Pid)
+				if hwnd != 0 {
+					logFn(fmt.Sprintf("       [隐私] ✅ 群管理窗口出现! (HWND=0x%X, %dms)", hwnd, (wait+1)*500))
+					return hwnd
+				}
 			}
-		}
-		if mgmtBtn != nil {
-			logFn(fmt.Sprintf("       [隐私] OCR 定位「群管理」(%d,%d)", mgmtBtn.CX, mgmtBtn.CY))
-			mgmtX, mgmtY = mgmtBtn.CX, mgmtBtn.CY
-			w.SafeRealClick(mgmtX, mgmtY)
-			mgmtClicked = true
+
+			// SendMessage 未打开, 尝试 SafeRealClick 回退
+			logFn("       [隐私] ⚠️ SendMessage 未打开窗口, 尝试 SafeRealClick...")
+			w.SafeRealClick(mgmtItem.CX, mgmtItem.CY)
+			humanDelay(2000, 500)
+			for wait := 0; wait < 10; wait++ {
+				humanDelay(500, 100)
+				hwnd := privFindGroupMgmtWindow(w.Pid)
+				if hwnd != 0 {
+					logFn(fmt.Sprintf("       [隐私] ✅ 群管理窗口出现 (SafeRealClick)! (HWND=0x%X)", hwnd))
+					return hwnd
+				}
+			}
+
+			logFn("       [隐私] ⚠️ SafeRealClick 也未打开, 重新打开面板...")
+			w.Click(dotsX, dotsY)
+			humanDelay(2000, 500)
 		} else {
+			// 打印面板内容帮助分析
 			var panelTexts []string
-			for _, it := range fgItems2 {
+			for _, it := range panelItems {
 				if it.CX > panelX {
-					panelTexts = append(panelTexts, it.Text)
+					panelTexts = append(panelTexts, fmt.Sprintf("「%s」@%d,%d", it.Text, it.CX, it.CY))
 				}
 			}
-			logFn(fmt.Sprintf("       [隐私] ⚠️ OCR 未匹配「群管理」, 面板: %v", panelTexts))
+			logFn(fmt.Sprintf("       [隐私] 面板内容: %v", panelTexts))
+
+			if attempt < 2 {
+				logFn("       [隐私] 重新点击 ···...")
+				w.Click(dotsX, dotsY)
+				humanDelay(2000, 500)
+			}
 		}
 	}
 
-	if !mgmtClicked {
-		mgmtX = int(float64(w.Width) * 0.82)
-		mgmtY = int(float64(w.Height) * 0.37)
-		logFn(fmt.Sprintf("       [隐私] 坐标回退「群管理」(%d,%d)", mgmtX, mgmtY))
-		w.SafeRealClick(mgmtX, mgmtY)
-	}
-
-	// ──── Step 3: 等待 ExternalConversationManagerWindow 出现 ────
-	logFn("       [隐私] Step3: 等待群管理窗口出现...")
-	for wait := 0; wait < 10; wait++ {
-		humanDelay(500, 100)
-		hwnd := privFindGroupMgmtWindow(w.Pid)
-		if hwnd != 0 {
-			logFn(fmt.Sprintf("       [隐私] ✅ 群管理窗口出现! (HWND=0x%X, %dms)", hwnd, (wait+1)*500))
-			return hwnd
-		}
-	}
-
-	logFn("       [隐私] ❌ 群管理窗口未出现")
-	// 收起面板
+	logFn("       [隐私] ❌ 3 次尝试均未找到「群管理」")
 	w.Click(int(float64(w.Width)*0.45), int(float64(w.Height)*0.50))
 	return 0
 }

@@ -96,6 +96,7 @@ const (
 	MOUSEEVENTF_LEFTUP   = 0x0004
 	MOUSEEVENTF_MOVE     = 0x0001
 	MOUSEEVENTF_ABSOLUTE = 0x8000
+	MOUSEEVENTF_WHEEL    = 0x0800
 	INPUT_MOUSE          = 0
 )
 
@@ -767,6 +768,44 @@ func (w *WeComWindow) SafeRealClick(x, y int) {
 	w.RealClick(x, y)
 
 	// 恢复鼠标位置 (减少对用户的干扰)
+	procSetCursorPos.Call(uintptr(savedPos.X), uintptr(savedPos.Y))
+}
+
+// SafeRealScroll 安全前台鼠标滚轮 (加锁 + 保存/恢复鼠标位置)
+// clientX, clientY: 窗口客户区坐标 (滚轮作用位置)
+// delta: 正=向上滚, 负=向下滚 (±120 = 1格, ±360 = 3格)
+func (w *WeComWindow) SafeRealScroll(clientX, clientY, delta int) {
+	foregroundMu.Lock()
+	defer foregroundMu.Unlock()
+
+	// 保存当前鼠标位置
+	var savedPos POINT
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&savedPos)))
+
+	// 保存当前前台窗口
+	prevFg, _, _ := procGetForegroundWindow.Call()
+
+	// 客户区 → 屏幕坐标
+	var pt POINT
+	pt.X = int32(clientX)
+	pt.Y = int32(clientY)
+	procClientToScreen.Call(uintptr(w.Hwnd), uintptr(unsafe.Pointer(&pt)))
+
+	// 前台化 + 移动鼠标
+	w.forceToForeground(w.Hwnd)
+	time.Sleep(80 * time.Millisecond)
+	simulateMouseMove(int(pt.X), int(pt.Y))
+	time.Sleep(80 * time.Millisecond)
+
+	// 发送真实滚轮事件 (mouse_event 硬件级)
+	d32 := uint32(int32(delta))
+	procMouseEvent.Call(MOUSEEVENTF_WHEEL, 0, 0, uintptr(d32), 0)
+	time.Sleep(150 * time.Millisecond)
+
+	// 取消 TOPMOST + 恢复
+	procSetWindowPos.Call(uintptr(w.Hwnd), ^uintptr(1), 0, 0, 0, 0,
+		SWP_NOMOVE|SWP_NOSIZE)
+	w.restoreForeground(prevFg)
 	procSetCursorPos.Call(uintptr(savedPos.X), uintptr(savedPos.Y))
 }
 

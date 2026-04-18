@@ -41,6 +41,10 @@ func main() {
 			TestScreenshotCapabilities()
 			return
 		}
+		if arg == "--interactive" || arg == "-interactive" {
+			InteractivePrivacyTest()
+			return
+		}
 	}
 
 	app := NewApp()
