@@ -400,3 +400,30 @@ func (s *ServerAPI) CreateGroupChat(name, owner string, memberUserIDs []string) 
 	return result.ChatID, nil
 }
 
+// ReportOperation 上报操作日志到服务器
+// 服务端接口: POST /admin/wecom/operation-log
+// 如果服务端未实现此接口, 会返回 404 错误但不影响主流程
+func (s *ServerAPI) ReportOperation(report OperationReport) error {
+	_, err := s.apiPost("/admin/wecom/operation-log", report)
+	if err != nil {
+		return fmt.Errorf("上报操作日志失败: %w", err)
+	}
+	return nil
+}
+
+// SendAlert 发送告警通知 (调用服务器 webhook 推送到企微群)
+// 服务端接口: POST /admin/wecom/alert
+// level: "warning" / "error" / "critical"
+func (s *ServerAPI) SendAlert(level, message string) error {
+	payload := map[string]string{
+		"level":   level,
+		"message": message,
+		"source":  "WeComAutoGroup",
+	}
+	_, err := s.apiPost("/admin/wecom/alert", payload)
+	if err != nil {
+		return fmt.Errorf("发送告警失败: %w", err)
+	}
+	return nil
+}
+

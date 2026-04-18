@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,11 +32,22 @@ func TestWindowOCR() {
 
 	// ═══ Step 2: 后台截图 ═══
 	fmt.Println("\n[2/4] 后台截图...")
-	wc.SinkToBottom() // 压到底层，不影响用户操作
-	img, pngData, err := wc.Screenshot()
+
+	// 直接测试 screenshotHwnd (不经过 Screenshot wrapper)
+	img, pngData, err := wc.screenshotHwnd(wc.Hwnd)
 	if err != nil {
-		fmt.Printf("  ❌ 截图失败: %s\n", err)
-		return
+		fmt.Printf("  ⚠️ screenshotHwnd 失败: %s, 尝试 flag=0 直接方式...\n", err)
+
+		// 直接用和 screenshotHwndWithFlag 一模一样的方式
+		_, pngData = screenshotHwndWithFlag(wc.Hwnd, 0)
+		if len(pngData) > 10000 {
+			fmt.Printf("  ✅ screenshotHwndWithFlag(flag=0) 成功! (%d bytes)\n", len(pngData))
+			// 解码 png 以便后续使用
+			img, _ = png.Decode(bytes.NewReader(pngData))
+		} else {
+			fmt.Printf("  ❌ screenshotHwndWithFlag(flag=0) 也失败 (%d bytes)\n", len(pngData))
+			return
+		}
 	}
 	bounds := img.Bounds()
 	fmt.Printf("  ✅ 截图成功! 尺寸=%dx%d 文件大小=%.1fKB\n",

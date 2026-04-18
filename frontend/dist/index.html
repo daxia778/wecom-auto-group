@@ -604,7 +604,7 @@
                 const idx = parseInt(cb.dataset.idx);
                 const c = contacts[idx];
                 if (!c) continue;
-                const name = (c.name || '').replace(' ✅', '');
+                const name = (c.name || '').replace(' ✅', '').replace(' 🧪测试', '');
                 await window.go.main.App.CreateGroupForCustomer(name, c.external_userid);
                 await new Promise(r => setTimeout(r, 1000));
             }

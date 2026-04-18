@@ -30,12 +30,20 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetTestAccounts() {
+  return window['go']['main']['App']['GetTestAccounts']();
+}
+
 export function IsAgentRunning() {
   return window['go']['main']['App']['IsAgentRunning']();
 }
 
 export function SaveSettings(arg1, arg2, arg3) {
   return window['go']['main']['App']['SaveSettings'](arg1, arg2, arg3);
+}
+
+export function SaveTestAccounts(arg1) {
+  return window['go']['main']['App']['SaveTestAccounts'](arg1);
 }
 
 export function StartAutoAgent() {

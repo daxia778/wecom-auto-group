@@ -31,6 +31,7 @@ type App struct {
 	stopCh        chan struct{}
 	logs          []string
 	logMu         sync.Mutex
+	logFile       *os.File   // 持久化日志文件
 	stateFile     string
 	state         AppState
 	cachedMembers []Member      // 启动时预加载的员工列表
@@ -39,16 +40,31 @@ type App struct {
 
 // AppState 本地持久化状态
 type AppState struct {
-	ProcessedCustomers []string `json:"processed_customers"`
-	TargetUserID       string   `json:"target_userid"`
-	FixedMembers       []string `json:"fixed_members"`
-	GroupOwner         string   `json:"group_owner"`
+	// ProcessedCustomers: uid → unix timestamp (改为 map, O(1) 查询)
+	// 兼容旧版: 如果 JSON 存的是 []string, loadState 会自动迁移
+	ProcessedCustomers map[string]int64 `json:"processed_customers"`
+	TargetUserID       string           `json:"target_userid"`
+	FixedMembers       []string         `json:"fixed_members"`
+	GroupOwner         string           `json:"group_owner"`
+	NeedReviewList     []string         `json:"need_review_list,omitempty"` // 需人工复核的 uid
+	TestCustomerNames  []string         `json:"test_customer_names,omitempty"` // 测试账号: 跳过防重, 每次都建群
 }
 
 func NewApp() *App {
+	// 状态文件保存到 %APPDATA%/WeComAutoGroup/ (不受 wails build -clean 影响)
+	appDataDir := filepath.Join(os.Getenv("APPDATA"), "WeComAutoGroup")
+	os.MkdirAll(appDataDir, 0755)
+	stateFile := filepath.Join(appDataDir, "local_state.json")
+
+	// 迁移: 如果旧位置 (EXE目录) 有状态文件，复制到新位置
 	exe, _ := os.Executable()
-	dir := filepath.Dir(exe)
-	stateFile := filepath.Join(dir, "local_state.json")
+	exeDir := filepath.Dir(exe)
+	oldStateFile := filepath.Join(exeDir, "local_state.json")
+	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+		if oldData, err := os.ReadFile(oldStateFile); err == nil {
+			os.WriteFile(stateFile, oldData, 0644)
+		}
+	}
 
 	// 使用服务器 API 中转 (绕过企微 IP 白名单)
 	sapi := NewServerAPI()
@@ -57,11 +73,23 @@ func NewApp() *App {
 		api:         sapi,
 		serverAPI:   sapi,
 		stateFile:   stateFile,
-		state:       AppState{},
+		state:       AppState{ProcessedCustomers: make(map[string]int64)},
 		startupDone: make(chan struct{}),
 	}
 	app.loadState()
+	app.initLogFile(appDataDir)
 	return app
+}
+
+// initLogFile 初始化持久化日志文件
+func (a *App) initLogFile(dir string) {
+	logPath := filepath.Join(dir, "wecom_autogroup.log")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		a.logFile = f
+		// 写入启动分隔线
+		f.WriteString(fmt.Sprintf("\n━━━ 启动 %s ━━━\n", time.Now().Format("2006-01-02 15:04:05")))
+	}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -138,9 +166,11 @@ func (a *App) GetContacts(userid string) []Contact {
 		return []Contact{}
 	}
 
-	// 标记已处理状态
+	// 标记已处理状态 (测试账号显示🧪而不是✅, 不屏蔽建群按钮)
 	for i := range contacts {
-		if a.isProcessed(contacts[i].ExternalUserID) {
+		if a.isTestAccount(contacts[i].Name) {
+			contacts[i].Name = contacts[i].Name + " 🧪测试"
+		} else if a.isProcessed(contacts[i].ExternalUserID) {
 			contacts[i].Name = contacts[i].Name + " ✅"
 		}
 	}
@@ -168,9 +198,11 @@ func (a *App) StartLoadContacts(userid string) {
 			return
 		}
 
-		// 标记已处理状态
+		// 标记已处理状态 (测试账号豁免)
 		for i := range contacts {
-			if a.isProcessed(contacts[i].ExternalUserID) {
+			if a.isTestAccount(contacts[i].Name) {
+				contacts[i].Name = contacts[i].Name + " 🧪测试"
+			} else if a.isProcessed(contacts[i].ExternalUserID) {
 				contacts[i].Name = contacts[i].Name + " ✅"
 			}
 		}
@@ -241,6 +273,18 @@ func (a *App) SaveSettings(targetUID string, members []string, groupOwner string
 	a.addLog(fmt.Sprintf("💾 配置已保存: 主理人=%s, 成员=%s", targetUID, strings.Join(members, "、")))
 }
 
+// SaveTestAccounts 设置测试账号 (测试账号跳过防重检查, 每次巡检都会建群)
+func (a *App) SaveTestAccounts(names []string) {
+	a.state.TestCustomerNames = names
+	a.saveState()
+	a.addLog(fmt.Sprintf("🧪 测试账号已设置: %v", names))
+}
+
+// GetTestAccounts 获取当前测试账号列表
+func (a *App) GetTestAccounts() []string {
+	return a.state.TestCustomerNames
+}
+
 // GetSettings 获取当前设置
 func (a *App) GetSettings() AppState {
 	return a.state
@@ -248,20 +292,63 @@ func (a *App) GetSettings() AppState {
 
 // CreateGroupForCustomer 为指定客户建群 (GUI 自动化)
 // 注: 带外部客户的群聊只能通过 GUI 创建, 企微 API 不支持外部群
-func (a *App) CreateGroupForCustomer(customerName string, customerUID string) string {
+// 返回 GroupResult (包含详细的成功/失败/隐私设置状态)
+func (a *App) CreateGroupForCustomer(customerName string, customerUID string) GroupResult {
+	// 清除前端显示标签 (GetContacts 会追加 ✅ 或 🧪测试, 搜索时不能带)
+	customerName = strings.TrimSpace(customerName)
+	customerName = strings.TrimSuffix(customerName, " ✅")
+	customerName = strings.TrimSuffix(customerName, " 🧪测试")
+	customerName = strings.TrimSuffix(customerName, "✅")
+	customerName = strings.TrimSuffix(customerName, "🧪测试")
+	customerName = strings.TrimSpace(customerName)
+
 	wc, err := FindWeComWindow()
 	if err != nil {
-		msg := fmt.Sprintf("❌ %s", err)
-		a.addLog(msg)
-		return msg
+		result := GroupResult{ErrorDetail: err.Error()}
+		a.addLog(fmt.Sprintf("❌ %s", err))
+		return result
 	}
 
 	a.addLog(fmt.Sprintf("🏗️ 开始建群: 客户=%s, 窗口=%dx%d", customerName, wc.Width, wc.Height))
-	wc.SinkToBottom()
 
-	success := wc.CreateGroupOCR(customerName, a.state.FixedMembers, a.addLog)
-	if success {
-		a.markProcessed(customerUID)
+	// ═══ 关键: 将 FixedMembers (UserID) 转为中文名 ═══
+	// WeCom 弹窗搜索只认中文名, 不能用 UserID (如 "WuZeHua")
+	memberNames := a.resolveToNames(a.state.FixedMembers)
+	a.addLog(fmt.Sprintf("   📋 成员名称: %v", memberNames))
+
+	result := wc.CreateGroupOCR(customerName, memberNames, a.addLog)
+
+	// 构建操作报告
+	report := NewReport(customerName, customerUID, "create_group")
+	report.Success = result.Success
+	report.PrivacyOK = result.PrivacyVerified
+	report.MembersOK = result.MembersSelected == result.MembersExpected
+	report.ErrorDetail = result.ErrorDetail
+	report.NeedReview = result.NeedManualCheck
+
+	if result.Success {
+		isTest := a.isTestAccount(customerName)
+		if result.PrivacyVerified {
+			// 完全成功: 建群 OK + 隐私设置已验证
+			if !isTest {
+				a.markProcessed(customerUID) // 测试账号不标记, 下次还能建
+			}
+			tag := ""
+			if isTest {
+				tag = " (测试账号)"
+			}
+			msg := fmt.Sprintf("✅ 【%s】建群成功！(隐私设置已验证)%s", customerName, tag)
+			a.addLog(msg)
+		} else {
+			// 部分成功: 建群 OK 但隐私设置未能验证
+			if !isTest {
+				a.markProcessed(customerUID)
+			}
+			a.markNeedReview(customerUID)
+			msg := fmt.Sprintf("⚠️ 【%s】建群成功, 但隐私设置需人工复核!", customerName)
+			a.addLog(msg)
+			a.reportAlert("warning", fmt.Sprintf("客户【%s】建群成功但「禁止互加好友」未能验证, 请人工检查", customerName))
+		}
 		// 触发服务端缓存刷新 (异步, 不阻塞)
 		if a.serverAPI != nil && a.serverAPI.token != "" {
 			go func() {
@@ -272,13 +359,15 @@ func (a *App) CreateGroupForCustomer(customerName string, customerUID string) st
 				}
 			}()
 		}
-		msg := fmt.Sprintf("✅ 【%s】建群成功！", customerName)
+	} else {
+		msg := fmt.Sprintf("❌ 【%s】建群失败: %s", customerName, result.ErrorDetail)
 		a.addLog(msg)
-		return msg
 	}
-	msg := fmt.Sprintf("❌ 【%s】建群失败", customerName)
-	a.addLog(msg)
-	return msg
+
+	// 异步上报操作日志
+	a.reportOperation(report)
+
+	return result
 }
 
 // StartAutoAgent 启动全自动巡检
@@ -353,7 +442,39 @@ func (a *App) addLog(msg string) {
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
 	ts := time.Now().Format("15:04:05")
-	a.logs = append(a.logs, fmt.Sprintf("[%s] %s", ts, msg))
+	line := fmt.Sprintf("[%s] %s", ts, msg)
+	a.logs = append(a.logs, line)
+
+	// 持久化到日志文件
+	if a.logFile != nil {
+		a.logFile.WriteString(line + "\n")
+	}
+}
+
+// reportOperation 异步上报操作日志到服务器 (不阻塞主流程)
+func (a *App) reportOperation(report OperationReport) {
+	a.addLog(fmt.Sprintf("📊 上报: %s [%s] success=%v privacy=%v review=%v",
+		report.Action, report.CustomerName, report.Success, report.PrivacyOK, report.NeedReview))
+
+	if a.serverAPI != nil && a.serverAPI.token != "" {
+		go func() {
+			if err := a.serverAPI.ReportOperation(report); err != nil {
+				a.addLog(fmt.Sprintf("   ⚠️ 日志上报失败: %v (已记录到本地)", err))
+			}
+		}()
+	}
+}
+
+// reportAlert 发送告警通知 (异步, 不阻塞主流程)
+func (a *App) reportAlert(level, message string) {
+	a.addLog(fmt.Sprintf("🚨 告警[%s]: %s", level, message))
+	if a.serverAPI != nil && a.serverAPI.token != "" {
+		go func() {
+			if err := a.serverAPI.SendAlert(level, message); err != nil {
+				a.addLog(fmt.Sprintf("   ⚠️ 告警发送失败: %v (已记录到本地)", err))
+			}
+		}()
+	}
 }
 
 func (a *App) agentLoop() {
@@ -412,18 +533,38 @@ func (a *App) agentLoop() {
 
 			newCount := 0
 			skipped := 0
+			consecutiveFails := 0
+			const maxConsecutiveFails = 3
+			inCycleProcessed := make(map[string]bool) // 轮内去重: 同一轮同一个人只建一次群
+
 			for _, c := range contacts {
 				if !a.running {
 					break
 				}
-				// 第 3 层: 本地已处理记录
-				if a.isProcessed(c.ExternalUserID) {
+
+				// ═══ 连续失败熔断检查 ═══
+				if consecutiveFails >= maxConsecutiveFails {
+					msg := fmt.Sprintf("🚨 连续 %d 次建群失败, 暂停巡检!", maxConsecutiveFails)
+					a.addLog(msg)
+					a.reportAlert("error", msg)
+					a.running = false
+					break
+				}
+
+				// ═══ 轮内去重: 同一轮巡检中同一客户只处理一次 (测试账号不受限) ═══
+				if inCycleProcessed[c.ExternalUserID] && !a.isTestAccount(c.Name) {
 					skipped++
 					continue
 				}
 
-				// 第 1 层: API 精确检查
-				if inGroup, ok := inGroupMap[c.ExternalUserID]; ok && inGroup {
+				// 第 3 层: 本地已处理记录 (测试账号跳过此检查)
+				if a.isProcessed(c.ExternalUserID) && !a.isTestAccount(c.Name) {
+					skipped++
+					continue
+				}
+
+				// 第 1 层: API 精确检查 (测试账号跳过此检查)
+				if inGroup, ok := inGroupMap[c.ExternalUserID]; ok && inGroup && !a.isTestAccount(c.Name) {
 					a.addLog(fmt.Sprintf("   ✅ 跳过【%s】(API: 已在客户群)", c.Name))
 					a.markProcessed(c.ExternalUserID)
 					skipped++
@@ -439,7 +580,7 @@ func (a *App) agentLoop() {
 							break
 						}
 					}
-					if hasGroup {
+					if hasGroup && !a.isTestAccount(c.Name) {
 						a.addLog(fmt.Sprintf("   ⚠️ 跳过【%s】(群名匹配)", c.Name))
 						a.markProcessed(c.ExternalUserID)
 						skipped++
@@ -448,9 +589,20 @@ func (a *App) agentLoop() {
 				}
 
 				newCount++
-				a.addLog(fmt.Sprintf("   🏗️ [%d] 为【%s】建群...", newCount, c.Name))
+				if a.isTestAccount(c.Name) {
+					a.addLog(fmt.Sprintf("   🧪 [%d] 测试账号【%s】建群...", newCount, c.Name))
+				} else {
+					a.addLog(fmt.Sprintf("   🏗️ [%d] 为【%s】建群...", newCount, c.Name))
+				}
 				// GUI 自动化建群
-				a.CreateGroupForCustomer(c.Name, c.ExternalUserID)
+				result := a.CreateGroupForCustomer(c.Name, c.ExternalUserID)
+				inCycleProcessed[c.ExternalUserID] = true // 轮内标记, 防止同一轮重复建群
+				if result.Success {
+					consecutiveFails = 0 // 成功则重置熔断计数
+				} else {
+					consecutiveFails++
+					a.addLog(fmt.Sprintf("   ⚠️ 连续失败计数: %d/%d", consecutiveFails, maxConsecutiveFails))
+				}
 				time.Sleep(2 * time.Second)
 			}
 			a.addLog(fmt.Sprintf("   📊 本轮结果: 新建=%d, 跳过=%d", newCount, skipped))
@@ -466,20 +618,38 @@ func (a *App) agentLoop() {
 	}
 }
 
+// ━━━ 状态管理 (map 版, 支持从旧 slice 格式迁移) ━━━
+
 func (a *App) isProcessed(uid string) bool {
-	for _, p := range a.state.ProcessedCustomers {
-		if p == uid {
-			return true
-		}
-	}
-	return false
+	_, exists := a.state.ProcessedCustomers[uid]
+	return exists
 }
 
 func (a *App) markProcessed(uid string) {
 	if !a.isProcessed(uid) {
-		a.state.ProcessedCustomers = append(a.state.ProcessedCustomers, uid)
+		a.state.ProcessedCustomers[uid] = time.Now().Unix()
 		a.saveState()
 	}
+}
+
+func (a *App) markNeedReview(uid string) {
+	for _, existing := range a.state.NeedReviewList {
+		if existing == uid {
+			return
+		}
+	}
+	a.state.NeedReviewList = append(a.state.NeedReviewList, uid)
+	a.saveState()
+}
+
+// isTestAccount 检查客户名是否是测试账号 (测试账号跳过所有防重检查)
+func (a *App) isTestAccount(customerName string) bool {
+	for _, testName := range a.state.TestCustomerNames {
+		if strings.Contains(customerName, testName) || strings.Contains(testName, customerName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) loadState() {
@@ -487,10 +657,61 @@ func (a *App) loadState() {
 	if err != nil {
 		return
 	}
-	json.Unmarshal(data, &a.state)
+
+	// 先尝试新格式 (map)
+	if err := json.Unmarshal(data, &a.state); err != nil {
+		return
+	}
+
+	// ═══ 旧格式迁移: 如果 processed_customers 是 []string 而不是 map ═══
+	// JSON 解码时 map[string]int64 遇到 ["str1","str2"] 会失败
+	// 此时需要手动检测并迁移
+	if a.state.ProcessedCustomers == nil {
+		a.state.ProcessedCustomers = make(map[string]int64)
+
+		// 重新解析检查旧格式
+		var rawState struct {
+			ProcessedCustomers json.RawMessage `json:"processed_customers"`
+			TargetUserID       string          `json:"target_userid"`
+			FixedMembers       []string        `json:"fixed_members"`
+			GroupOwner         string          `json:"group_owner"`
+		}
+		if json.Unmarshal(data, &rawState) == nil && len(rawState.ProcessedCustomers) > 0 {
+			// 尝试解析为 []string (旧格式)
+			var oldList []string
+			if json.Unmarshal(rawState.ProcessedCustomers, &oldList) == nil && len(oldList) > 0 {
+				now := time.Now().Unix()
+				for _, uid := range oldList {
+					a.state.ProcessedCustomers[uid] = now
+				}
+				a.state.TargetUserID = rawState.TargetUserID
+				a.state.FixedMembers = rawState.FixedMembers
+				a.state.GroupOwner = rawState.GroupOwner
+				// 立即保存新格式
+				a.saveState()
+			}
+		}
+	}
 }
 
 func (a *App) saveState() {
 	data, _ := json.MarshalIndent(a.state, "", "  ")
 	os.WriteFile(a.stateFile, data, 0644)
+}
+
+// resolveToNames 将 UserID 列表转为中文名列表
+// FixedMembers 存的是 UserID (如 "WuZeHua"), WeCom 弹窗搜索需要中文名 (如 "吴泽华")
+func (a *App) resolveToNames(userIDs []string) []string {
+	names := make([]string, 0, len(userIDs))
+	for _, uid := range userIDs {
+		resolved := uid // 默认: 如果找不到就原样返回
+		for _, m := range a.cachedMembers {
+			if strings.EqualFold(m.UserID, uid) {
+				resolved = m.Name
+				break
+			}
+		}
+		names = append(names, resolved)
+	}
+	return names
 }

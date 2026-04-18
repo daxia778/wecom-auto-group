@@ -25,6 +25,22 @@ func main() {
 			TestWindowOCR()
 			return
 		}
+		if arg == "--privacy-test" || arg == "-privacy-test" {
+			TestPrivacyFlow()
+			return
+		}
+		if arg == "--spy-windows" || arg == "-spy-windows" {
+			TestSpyWindows()
+			return
+		}
+		if arg == "--click-test" || arg == "-click-test" {
+			TestBackendClick()
+			return
+		}
+		if arg == "--screenshot-test" || arg == "-screenshot-test" {
+			TestScreenshotCapabilities()
+			return
+		}
 	}
 
 	app := NewApp()

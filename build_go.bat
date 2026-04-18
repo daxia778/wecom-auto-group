@@ -26,7 +26,7 @@ go mod tidy
 echo.
 
 echo [3/4] Building EXE (wails build)...
-wails build -clean -platform windows/amd64
+wails build -clean -platform windows/amd64 -ldflags "-H windowsgui"
 echo.
 
 if exist "build\bin\WeComAutoGroup.exe" (
