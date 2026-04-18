@@ -48,6 +48,7 @@ type AppState struct {
 	GroupOwner         string           `json:"group_owner"`
 	NeedReviewList     []string         `json:"need_review_list,omitempty"` // 需人工复核的 uid
 	TestCustomerNames  []string         `json:"test_customer_names,omitempty"` // 测试账号: 跳过防重, 每次都建群
+	RootMode           bool             `json:"root_mode,omitempty"`           // Root模式: 所有客户跳过防重, 无限建群
 }
 
 func NewApp() *App {
@@ -123,6 +124,18 @@ func (a *App) startup(ctx context.Context) {
 
 	a.addLog("✅ 应用启动成功")
 
+	// 自动检测 Root 模式: 如果群主是 root 操作员, 自动开启
+	if a.state.GroupOwner != "" && IsRootOperator(a.state.GroupOwner) {
+		if !a.state.RootMode {
+			a.state.RootMode = true
+			a.saveState()
+		}
+		a.addLog("🔓 Root 操作员【" + a.state.GroupOwner + "】: 所有客户可无限建群")
+	}
+	if a.state.RootMode {
+		a.addLog("📋 当前模式: Root (跳过所有防重检查)")
+	}
+
 	// 通知所有等待的前端 RPC 调用: startup 已完成
 	close(a.startupDone)
 }
@@ -166,12 +179,16 @@ func (a *App) GetContacts(userid string) []Contact {
 		return []Contact{}
 	}
 
-	// 标记已处理状态 (测试账号显示🧪而不是✅, 不屏蔽建群按钮)
+	// 标记已处理状态
+	// Root模式: 不加任何标记, 所有客户都正常显示
+	// 非Root: 测试账号显示🧪, 已处理显示✅
 	for i := range contacts {
-		if a.isTestAccount(contacts[i].Name) {
-			contacts[i].Name = contacts[i].Name + " 🧪测试"
-		} else if a.isProcessed(contacts[i].ExternalUserID) {
-			contacts[i].Name = contacts[i].Name + " ✅"
+		if !a.state.RootMode {
+			if a.isTestAccount(contacts[i].Name) {
+				contacts[i].Name = contacts[i].Name + " 🧪测试"
+			} else if a.isProcessed(contacts[i].ExternalUserID) {
+				contacts[i].Name = contacts[i].Name + " ✅"
+			}
 		}
 	}
 
@@ -198,12 +215,14 @@ func (a *App) StartLoadContacts(userid string) {
 			return
 		}
 
-		// 标记已处理状态 (测试账号豁免)
+		// 标记已处理状态 (Root模式不加标记)
 		for i := range contacts {
-			if a.isTestAccount(contacts[i].Name) {
-				contacts[i].Name = contacts[i].Name + " 🧪测试"
-			} else if a.isProcessed(contacts[i].ExternalUserID) {
-				contacts[i].Name = contacts[i].Name + " ✅"
+			if !a.state.RootMode {
+				if a.isTestAccount(contacts[i].Name) {
+					contacts[i].Name = contacts[i].Name + " 🧪测试"
+				} else if a.isProcessed(contacts[i].ExternalUserID) {
+					contacts[i].Name = contacts[i].Name + " ✅"
+				}
 			}
 		}
 
@@ -643,13 +662,47 @@ func (a *App) markNeedReview(uid string) {
 }
 
 // isTestAccount 检查客户名是否是测试账号 (测试账号跳过所有防重检查)
+// Root模式下所有客户都视为测试账号
 func (a *App) isTestAccount(customerName string) bool {
+	// Root模式: 全部跳过防重
+	if a.state.RootMode {
+		return true
+	}
 	for _, testName := range a.state.TestCustomerNames {
 		if strings.Contains(customerName, testName) || strings.Contains(testName, customerName) {
 			return true
 		}
 	}
 	return false
+}
+
+// Root 操作员列表 (这些账号可以启用 root 模式)
+var rootOperators = []string{"刘浩东"}
+
+// IsRootOperator 检查是否是 root 操作员
+func IsRootOperator(name string) bool {
+	for _, op := range rootOperators {
+		if name == op {
+			return true
+		}
+	}
+	return false
+}
+
+// SetRootMode 设置 root 模式
+func (a *App) SetRootMode(enabled bool) {
+	a.state.RootMode = enabled
+	a.saveState()
+	if enabled {
+		a.addLog("🔓 Root 模式已开启: 所有客户跳过防重, 可无限建群")
+	} else {
+		a.addLog("🔒 Root 模式已关闭: 恢复正常防重检查")
+	}
+}
+
+// GetRootMode 获取 root 模式状态
+func (a *App) GetRootMode() bool {
+	return a.state.RootMode
 }
 
 func (a *App) loadState() {

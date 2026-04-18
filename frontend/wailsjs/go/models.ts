@@ -7,6 +7,7 @@ export namespace main {
 	    group_owner: string;
 	    need_review_list?: string[];
 	    test_customer_names?: string[];
+	    root_mode?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppState(source);
@@ -20,6 +21,7 @@ export namespace main {
 	        this.group_owner = source["group_owner"];
 	        this.need_review_list = source["need_review_list"];
 	        this.test_customer_names = source["test_customer_names"];
+	        this.root_mode = source["root_mode"];
 	    }
 	}
 	export class Contact {

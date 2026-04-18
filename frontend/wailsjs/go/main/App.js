@@ -26,6 +26,10 @@ export function GetMembers() {
   return window['go']['main']['App']['GetMembers']();
 }
 
+export function GetRootMode() {
+  return window['go']['main']['App']['GetRootMode']();
+}
+
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
@@ -44,6 +48,10 @@ export function SaveSettings(arg1, arg2, arg3) {
 
 export function SaveTestAccounts(arg1) {
   return window['go']['main']['App']['SaveTestAccounts'](arg1);
+}
+
+export function SetRootMode(arg1) {
+  return window['go']['main']['App']['SetRootMode'](arg1);
 }
 
 export function StartAutoAgent() {

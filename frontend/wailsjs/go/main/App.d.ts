@@ -14,6 +14,8 @@ export function GetLogs():Promise<Array<string>>;
 
 export function GetMembers():Promise<Array<main.Member>>;
 
+export function GetRootMode():Promise<boolean>;
+
 export function GetSettings():Promise<main.AppState>;
 
 export function GetTestAccounts():Promise<Array<string>>;
@@ -23,6 +25,8 @@ export function IsAgentRunning():Promise<boolean>;
 export function SaveSettings(arg1:string,arg2:Array<string>,arg3:string):Promise<void>;
 
 export function SaveTestAccounts(arg1:Array<string>):Promise<void>;
+
+export function SetRootMode(arg1:boolean):Promise<void>;
 
 export function StartAutoAgent():Promise<string>;
 
