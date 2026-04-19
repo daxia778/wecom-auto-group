@@ -675,6 +675,24 @@ func (a *App) agentLoop() {
 					a.addLog(fmt.Sprintf("   🏗️ [%d] 为【%s】建群...", newCount, c.Name))
 				}
 
+				// ═══ 最终安全检查: 建群前实时确认 GroupCount == 0 ═══
+				// 批量检查到此刻可能有时间差, 必须再查一次确保一客一群
+				if a.serverAPI != nil && a.serverAPI.token != "" && !a.isTestAccount(c.Name) {
+					lastCheck, lastErr := a.serverAPI.CheckCustomerInGroups([]string{c.ExternalUserID})
+					if lastErr == nil {
+						if r, ok := lastCheck[c.ExternalUserID]; ok && r.GroupCount >= 1 {
+							a.addLog(fmt.Sprintf("   🛑 最终检查: 【%s】已在 %d 个群中, 取消建群!", c.Name, r.GroupCount))
+							a.markProcessed(c.ExternalUserID)
+							skipped++
+							newCount-- // 回退计数
+							continue
+						}
+						a.addLog(fmt.Sprintf("   ✅ 最终确认: 【%s】GroupCount=0, 安全建群", c.Name))
+					} else {
+						a.addLog(fmt.Sprintf("   ⚠️ 最终检查API失败: %v, 依赖本地记录继续", lastErr))
+					}
+				}
+
 				// ═══ 防崩溃: 先标记已处理, 建群失败再回滚 ═══
 				// 避免: 建群成功 → 程序崩溃 → markProcessed 未执行 → 下轮重复建群
 				if !a.isTestAccount(c.Name) {
