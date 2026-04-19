@@ -602,6 +602,7 @@ func (a *App) agentLoop() {
 			consecutiveFails := 0
 			const maxConsecutiveFails = 3
 			inCycleProcessed := make(map[string]bool) // 轮内去重: 同一轮同一个人只建一次群
+			customerFailCount := make(map[string]int)  // 单客户累计失败次数 (防无限重试)
 
 			for _, c := range contacts {
 				if !a.running {
@@ -673,13 +674,32 @@ func (a *App) agentLoop() {
 				} else {
 					a.addLog(fmt.Sprintf("   🏗️ [%d] 为【%s】建群...", newCount, c.Name))
 				}
+
+				// ═══ 防崩溃: 先标记已处理, 建群失败再回滚 ═══
+				// 避免: 建群成功 → 程序崩溃 → markProcessed 未执行 → 下轮重复建群
+				if !a.isTestAccount(c.Name) {
+					a.markProcessed(c.ExternalUserID)
+				}
+
 				// GUI 自动化建群
 				result := a.CreateGroupForCustomer(c.Name, c.ExternalUserID)
 				inCycleProcessed[c.ExternalUserID] = true // 轮内标记, 防止同一轮重复建群
 				if result.Success {
 					consecutiveFails = 0 // 成功则重置熔断计数
+					delete(customerFailCount, c.ExternalUserID) // 成功清除失败记录
 				} else {
 					consecutiveFails++
+					customerFailCount[c.ExternalUserID]++
+					// 建群失败: 回滚 processed 标记 (允许下轮重试)
+					if !a.isTestAccount(c.Name) {
+						a.unmarkProcessed(c.ExternalUserID)
+					}
+					// 单客户累计失败 ≥3 次: 标记需人工复核, 不再自动重试
+					if customerFailCount[c.ExternalUserID] >= 3 {
+						a.addLog(fmt.Sprintf("   🚫 【%s】累计 3 次失败, 标记人工复核", c.Name))
+						a.markProcessed(c.ExternalUserID)
+						a.markNeedReview(c.ExternalUserID)
+					}
 					a.addLog(fmt.Sprintf("   ⚠️ 连续失败计数: %d/%d", consecutiveFails, maxConsecutiveFails))
 				}
 				time.Sleep(2 * time.Second)
@@ -707,6 +727,14 @@ func (a *App) isProcessed(uid string) bool {
 func (a *App) markProcessed(uid string) {
 	if !a.isProcessed(uid) {
 		a.state.ProcessedCustomers[uid] = time.Now().Unix()
+		a.saveState()
+	}
+}
+
+// unmarkProcessed 回滚已处理标记 (建群失败时使用)
+func (a *App) unmarkProcessed(uid string) {
+	if a.isProcessed(uid) {
+		delete(a.state.ProcessedCustomers, uid)
 		a.saveState()
 	}
 }
