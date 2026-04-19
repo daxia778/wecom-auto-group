@@ -66,7 +66,12 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 	// ═══ Step 1: 点击消息 Tab (OCR 定位) ═══
 	logFn("  [1/8] 点击消息 Tab...")
 	msgClicked := false
-	items, err := w.OCRScan()
+	// 优先前台截图 (PrintWindow 在 Chromium 区域经常黑屏)
+	items, err := w.OCRScanForeground()
+	if err != nil || len(items) == 0 {
+		// 回退到后台截图
+		items, err = w.OCRScan()
+	}
 	if err == nil && len(items) > 0 {
 		logFn(fmt.Sprintf("  [1/8] OCR: %d 项", len(items)))
 		match := FindOCRText(items, "消息")
@@ -74,7 +79,18 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 			logFn(fmt.Sprintf("  [1/8] OCR 找到「消息」: (%d,%d)", match.CX, match.CY))
 			w.Click(match.CX, match.CY)
 			msgClicked = true
+		} else {
+			// 打印左侧栏 OCR 结果帮助分析 (x < 100 的项)
+			var sidebarItems []string
+			for _, it := range items {
+				if it.CX < 100 {
+					sidebarItems = append(sidebarItems, fmt.Sprintf("「%s」@(%d,%d)", it.Text, it.CX, it.CY))
+				}
+			}
+			logFn(fmt.Sprintf("  [1/8] ⚠️ 未找到「消息」, 侧栏OCR: %v", sidebarItems))
 		}
+	} else {
+		logFn(fmt.Sprintf("  [1/8] ⚠️ OCR 扫描失败 (err=%v, items=%d)", err, len(items)))
 	}
 	if !msgClicked {
 		// 回退: 侧栏「消息」在 x≈28, y≈80
@@ -88,7 +104,7 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 	logFn("  [2/8] 点击 + 按钮...")
 	plusClicked := false
 	if items != nil {
-		// 智谱 OCR 把 + 图标识别为 "十"
+		// 智谱 OCR 可能把 + 识别为 "十" "+" 或其他
 		plusBtn := FindOCRText(items, "十")
 		if plusBtn == nil {
 			plusBtn = FindOCRText(items, "+")
@@ -98,6 +114,15 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 			logFn(fmt.Sprintf("  [2/8] OCR 定位 + 按钮: (%d,%d)", plusBtn.CX, plusBtn.CY))
 			w.Click(plusBtn.CX, plusBtn.CY)
 			plusClicked = true
+		} else {
+			// 打印搜索栏附近 OCR 结果
+			var topItems []string
+			for _, it := range items {
+				if it.CY < 60 {
+					topItems = append(topItems, fmt.Sprintf("「%s」@(%d,%d)", it.Text, it.CX, it.CY))
+				}
+			}
+			logFn(fmt.Sprintf("  [2/8] ⚠️ 未找到 + 按钮, 顶部OCR: %v", topItems))
 		}
 	}
 	if !plusClicked {

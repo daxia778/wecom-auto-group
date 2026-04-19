@@ -45,6 +45,10 @@ func main() {
 			InteractivePrivacyTest()
 			return
 		}
+		if arg == "--group-test" || arg == "-group-test" {
+			TestGroupCreation()
+			return
+		}
 	}
 
 	app := NewApp()
