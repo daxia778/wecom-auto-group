@@ -452,6 +452,12 @@
                 console.error('[GetSettings]', e);
             }
 
+            // 4. Check Root mode (controls checkbox enable/disable)
+            try {
+                window._rootMode = await window.go.main.App.GetRootMode();
+                if (window._rootMode) addLogLine('🔓 Root 模式: 所有客户可选中');
+            } catch (e) { window._rootMode = false; }
+
             setupContactEvents();
             logTimer = setInterval(refreshLogs, 1000);
         };
@@ -538,7 +544,7 @@
             const displayName = (c.name || '').replace(' ✅', '').replace(' 🧪测试', '');
             const typeText = c.type === 1 ? '普通用户' : '企业伙伴';
             const groupCount = c.group_count || 0;
-            const isDisabled = isDone || groupCount >= 1;
+            const isDisabled = window._rootMode ? false : (isDone || groupCount >= 1);
 
             // 外部群 badge
             let groupBadge;
