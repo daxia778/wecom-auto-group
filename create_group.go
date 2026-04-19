@@ -14,7 +14,8 @@ import (
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //   OCR 驱动建群流程 (移植自 Python app.py create_grp)
 //
-//   每步: OCR 优先定位 → 坐标比例回退 → 操作后验证
+//   架构: 引导式 OCR (Guided OCR)
+//   每步: 预测坐标 → OCR 扫描 → 区域约束验证 → 操作
 //   全程后台执行，不抢鼠标不抢键盘
 //   (隐私设置步骤需短暂前台, 已加锁保护)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -26,6 +27,83 @@ const (
 	refW = 1046.0
 	refH = 705.0
 )
+
+// ═══ 引导式 OCR 基础设施 ═══
+
+// OCRTarget 定义一个可点击元素的预期位置和 OCR 匹配规则
+// Region 约束 OCR 搜索范围, Fallback 是 OCR 失败时的比例坐标
+type OCRTarget struct {
+	Name     string     // 调试名称 (如 "搜索框", "完成按钮")
+	Text     string     // OCR 匹配文字 (子串匹配)
+	Region   [4]float64 // 预期区域 [x1%, y1%, x2%, y2%] (占宿主窗口比例)
+	Fallback [2]float64 // 回退坐标 [x%, y%] (占宿主窗口比例)
+}
+
+// resolveTarget 引导式 OCR 定位
+// 流程: 在 OCR 结果中查找匹配文字 → 验证是否在预期区域内 → 回退到比例坐标
+// 返回: (x, y, 置信度描述)
+func resolveTarget(target OCRTarget, ocrItems []OCRItem, w, h int) (int, int, string) {
+	fbX := int(float64(w) * target.Fallback[0])
+	fbY := int(float64(h) * target.Fallback[1])
+
+	if len(ocrItems) == 0 {
+		return fbX, fbY, "回退(无OCR)"
+	}
+
+	// 计算预期区域的像素坐标
+	rX1 := int(float64(w) * target.Region[0])
+	rY1 := int(float64(h) * target.Region[1])
+	rX2 := int(float64(w) * target.Region[2])
+	rY2 := int(float64(h) * target.Region[3])
+
+	// 优先: 在预期区域内查找匹配
+	for _, item := range ocrItems {
+		if !strings.Contains(item.Text, target.Text) {
+			continue
+		}
+		if item.CX >= rX1 && item.CX <= rX2 && item.CY >= rY1 && item.CY <= rY2 {
+			return item.CX, item.CY, "OCR精确"
+		}
+	}
+
+	// 次选: 区域外但文字匹配 (可能 UI 布局变了)
+	for _, item := range ocrItems {
+		if strings.Contains(item.Text, target.Text) {
+			return item.CX, item.CY, "OCR区域外⚠️"
+		}
+	}
+
+	return fbX, fbY, "回退(OCR未匹配)"
+}
+
+// NormalizeSize 标准化企微窗口大小 (保证最小尺寸, 确保 UI 元素不被压缩)
+// 返回是否进行了调整
+func (w *WeComWindow) NormalizeSize() bool {
+	const minW, minH = 1046, 705
+	if w.Width >= minW && w.Height >= minH {
+		return false
+	}
+	newW := w.Width
+	newH := w.Height
+	if newW < minW {
+		newW = minW
+	}
+	if newH < minH {
+		newH = minH
+	}
+	var wr RECT
+	procGetWindowRect.Call(uintptr(w.Hwnd), uintptr(unsafe.Pointer(&wr)))
+	procSetWindowPos.Call(uintptr(w.Hwnd), 0,
+		uintptr(wr.Left), uintptr(wr.Top), uintptr(newW), uintptr(newH),
+		SWP_NOACTIVATE)
+	time.Sleep(500 * time.Millisecond)
+	// 更新缓存尺寸
+	var cr RECT
+	procGetClientRect.Call(uintptr(w.Hwnd), uintptr(unsafe.Pointer(&cr)))
+	w.Width = int(cr.Right)
+	w.Height = int(cr.Bottom)
+	return true
+}
 
 // resetWeComState 建群前清理残留状态
 // 关闭所有弹窗, 点击聊天区空白处收起面板
@@ -174,10 +252,28 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 	pw, ph := w.popupClientSize(popupClass)
 	logFn(fmt.Sprintf("  [3/8] ✅ 弹窗已打开 (%dx%d)", pw, ph))
 
-	// ═══ Step 4: 逐个搜索并选中成员 (不做逐人OCR验证, 在Step6统一校验) ═══
-	// 优化: 去掉逐人OCR验证, 省 N 次OCR调用 (每次0.01元 + 3秒)
-	// 改为在 Step 6 通过「已选择N个联系人」统一验证
-	logFn(fmt.Sprintf("  [4/8] 添加 %d 名成员 (用中文名搜索)", len(allMembers)))
+	// ═══ Step 4: 逐个搜索并选中成员 (OCR 精确定位, 适配不同分辨率) ═══
+	// 搜索框: OCR 一次定位, 缓存后复用 (省 API 调用)
+	// 勾选框: 每人 OCR 一次, 精确定位搜索结果的 Y 坐标
+	logFn(fmt.Sprintf("  [4/8] 添加 %d 名成员 (OCR 辅助定位)", len(allMembers)))
+
+	// ── OCR 定位搜索框 (一次性, 整个 Step 4 复用) ──
+	searchBoxX := pw / 2                       // 默认: 弹窗水平居中
+	searchBoxY := int(float64(ph) * 0.055)     // 默认: 弹窗顶部 5.5%
+	popupOCRItems, popupOCRErr := w.OCRScanPopup(popupClass)
+	if popupOCRErr == nil {
+		searchMatch := FindOCRText(popupOCRItems, "搜索")
+		if searchMatch != nil {
+			searchBoxX = searchMatch.CX
+			searchBoxY = searchMatch.CY
+			logFn(fmt.Sprintf("  [4/8] OCR 定位搜索框: (%d,%d)", searchBoxX, searchBoxY))
+		} else {
+			logFn(fmt.Sprintf("  [4/8] OCR 未找到「搜索」, 比例回退 (%d,%d)", searchBoxX, searchBoxY))
+		}
+	} else {
+		logFn(fmt.Sprintf("  [4/8] ⚠️ 弹窗 OCR 失败, 比例回退 (%d,%d)", searchBoxX, searchBoxY))
+	}
+
 	membersSelected := 0
 	for i, m := range allMembers {
 		logFn(fmt.Sprintf("  [4/8] (%d/%d) 搜索: %s", i+1, len(allMembers), m))
@@ -186,39 +282,55 @@ func (w *WeComWindow) CreateGroupOCR(customer string, members []string, logFn fu
 			humanDelay(800, 400)
 		}
 
-		// ═══ 搜索前: 强制清空搜索框 (双重清除防堆叠) ═══
-		w.ClickPopup(popupClass, 160, 40) // 点击搜索框获取焦点
+		// ═══ 搜索前: 点击搜索框 (OCR 定位) + 清空 ═══
+		w.ClickPopup(popupClass, searchBoxX, searchBoxY)
 		humanDelay(300, 100)
-		w.ClearPopupInput(popupClass)     // 第一次清空
+		w.ClearPopupInput(popupClass)
 		humanDelay(500, 200)
-		w.ClearPopupInput(popupClass)     // 第二次清空 (确保干净)
+		w.ClearPopupInput(popupClass)
 		humanDelay(300, 100)
 
 		// 输入中文名搜索
 		w.TypeToPopup(popupClass, m)
-		humanDelay(2000, 500) // 等搜索结果加载 (网络慢时需要更久)
+		humanDelay(2000, 500) // 等搜索结果加载
 
-		// 勾选第一个搜索结果 (checkbox 在左侧 x≈25, 第一结果 y≈95)
-		w.ClickPopup(popupClass, 25, 95)
+		// ═══ OCR 定位搜索结果 → 精确点击 checkbox ═══
+		checkX := int(float64(pw) * 0.03) // 默认: 弹窗左侧 3% (checkbox 固定在最左)
+		if checkX < 15 {
+			checkX = 15
+		}
+		checkY := int(float64(ph) * 0.135) // 默认: 弹窗顶部 13.5% (第一条结果位置)
+		resultItems, resultErr := w.OCRScanPopup(popupClass)
+		if resultErr == nil {
+			resultMatch := FindOCRText(resultItems, m)
+			if resultMatch != nil && resultMatch.CY > searchBoxY+20 {
+				// 找到搜索结果! checkbox 在文字同行最左侧
+				checkY = resultMatch.CY
+				logFn(fmt.Sprintf("  [4/8] OCR 定位「%s」→ checkbox (%d,%d)", resultMatch.Text, checkX, checkY))
+			} else {
+				logFn(fmt.Sprintf("  [4/8] OCR 未匹配「%s」, 比例回退 (%d,%d)", m, checkX, checkY))
+			}
+		}
+		w.ClickPopup(popupClass, checkX, checkY)
 		membersSelected++
 		logFn(fmt.Sprintf("  [4/8] (%d/%d) ✅ 已勾选 %s", i+1, len(allMembers), m))
 		humanDelay(800, 300)
 
-		// ═══ 勾选后: 强制清空搜索框 (三重清除, 彻底防堆叠) ═══
-		w.ClickPopup(popupClass, 160, 40) // 回到搜索框
+		// ═══ 勾选后: 清空搜索框 (三重清除) ═══
+		w.ClickPopup(popupClass, searchBoxX, searchBoxY)
 		humanDelay(300, 100)
-		w.ClearPopupInput(popupClass)     // 清空 1
+		w.ClearPopupInput(popupClass)
 		humanDelay(300, 100)
-		w.ClearPopupInput(popupClass)     // 清空 2
+		w.ClearPopupInput(popupClass)
 		humanDelay(200, 100)
-		w.ClearPopupInput(popupClass)     // 清空 3
+		w.ClearPopupInput(popupClass)
 		humanDelay(300, 100)
 	}
 	result.MembersSelected = membersSelected
 
-	// ═══ Step 5: 清空搜索框 (二次确认) ═══
+	// ═══ Step 5: 清空搜索框 (二次确认, 使用 OCR 定位坐标) ═══
 	logFn("  [5/8] 清空搜索框...")
-	w.ClickPopup(popupClass, 160, 40)
+	w.ClickPopup(popupClass, searchBoxX, searchBoxY)
 	humanDelay(150, 50)
 	w.ClearPopupInput(popupClass)
 	humanDelay(300, 100)

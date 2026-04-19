@@ -257,6 +257,16 @@
         .dot { width: 6px; height: 6px; border-radius: 50%; }
         .dot-done { background: var(--success); }
         .dot-pending { background: var(--text-tertiary); }
+        .dot-warn { background: var(--warning); }
+        
+        .group-badge {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600;
+            line-height: 1.4;
+        }
+        .group-badge.none { background: rgba(255,255,255,0.04); color: var(--text-tertiary); }
+        .group-badge.single { background: rgba(16,185,129,0.12); color: var(--success); }
+        .group-badge.multi { background: rgba(245,158,11,0.15); color: var(--warning); }
         
         input[type="checkbox"] {
             appearance: none; width: 14px; height: 14px;
@@ -365,11 +375,12 @@
                             <th style="width: 48px; text-align: center;"><input type="checkbox" id="checkAll" onchange="toggleAll()"></th>
                             <th>客户微信号 / 昵称</th>
                             <th>客户特征</th>
+                            <th>外部群</th>
                             <th>处理状态</th>
                         </tr>
                     </thead>
                     <tbody id="contactTable">
-                        <tr><td colspan="4" style="text-align:center; padding: 60px 0; font-size:13px; color: var(--text-tertiary);">← 左侧设置主理人并点击右上角「提取」</td></tr>
+                        <tr><td colspan="5" style="text-align:center; padding: 60px 0; font-size:13px; color: var(--text-tertiary);">← 左侧设置主理人并点击右上角「提取」</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -524,21 +535,55 @@
 
         function createContactRow(c, idx) {
             const isDone = (c.name || '').includes('✅');
-            const displayName = (c.name || '').replace(' ✅', '');
+            const displayName = (c.name || '').replace(' ✅', '').replace(' 🧪测试', '');
             const typeText = c.type === 1 ? '普通用户' : '企业伙伴';
+            const groupCount = c.group_count || 0;
+            const isDisabled = isDone || groupCount >= 1;
+
+            // 外部群 badge
+            let groupBadge;
+            if (groupCount === 0) {
+                groupBadge = '<span class="group-badge none">0</span>';
+            } else if (groupCount === 1) {
+                groupBadge = '<span class="group-badge single">✓ 1</span>';
+            } else {
+                groupBadge = `<span class="group-badge multi">⚠ ${groupCount}</span>`;
+            }
+
+            // 处理状态 (融合 API 群数据)
+            let statusText, statusColor, statusDotClass;
+            if (groupCount > 1) {
+                statusText = '多群异常';
+                statusColor = 'var(--warning)';
+                statusDotClass = 'dot-warn';
+            } else if (groupCount === 1) {
+                statusText = '已在群';
+                statusColor = 'var(--success)';
+                statusDotClass = 'dot-done';
+            } else if (isDone) {
+                statusText = '已处理';
+                statusColor = 'var(--success)';
+                statusDotClass = 'dot-done';
+            } else {
+                statusText = '待建群';
+                statusColor = 'var(--text-tertiary)';
+                statusDotClass = 'dot-pending';
+            }
+
             const tr = document.createElement('tr');
             tr.dataset.name = displayName.toLowerCase();
             tr.innerHTML = `
-                <td style="text-align: center;"><input type="checkbox" data-idx="${idx}" ${isDone ? 'disabled' : ''}></td>
+                <td style="text-align: center;"><input type="checkbox" data-idx="${idx}" ${isDisabled ? 'disabled' : ''}></td>
                 <td style="font-weight: 500; display:flex; align-items:center; height: 35px;">
                     <div style="width:20px; height:20px; background:rgba(255,255,255,0.05); border-radius:50%; margin-right:10px; display:flex; align-items:center; justify-content:center; font-size:10px;">👤</div>
                     ${escapeHtml(displayName)}
                 </td>
                 <td><span style="border:1px solid var(--border-light); padding:2px 6px; border-radius:4px; font-size:10px; color:var(--text-tertiary);">${typeText}</span></td>
+                <td>${groupBadge}</td>
                 <td>
-                    <div class="status-cell" style="color: ${isDone ? 'var(--success)' : 'var(--text-tertiary)'}">
-                        <div class="dot ${isDone ? 'dot-done' : 'dot-pending'}"></div>
-                        ${isDone ? '已建群' : '未处理'}
+                    <div class="status-cell" style="color: ${statusColor}">
+                        <div class="dot ${statusDotClass}"></div>
+                        ${statusText}
                     </div>
                 </td>
             `;

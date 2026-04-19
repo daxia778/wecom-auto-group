@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function CreateGroupForCustomer(arg1:string,arg2:string):Promise<main.GroupResult>;
 
+export function GetAutoCutoffTime():Promise<number>;
+
 export function GetContacts(arg1:string):Promise<Array<main.Contact>>;
 
 export function GetFollowUserList():Promise<Array<string>>;
@@ -25,6 +27,8 @@ export function IsAgentRunning():Promise<boolean>;
 export function SaveSettings(arg1:string,arg2:Array<string>,arg3:string):Promise<void>;
 
 export function SaveTestAccounts(arg1:Array<string>):Promise<void>;
+
+export function SetAutoCutoffTime(arg1:number):Promise<void>;
 
 export function SetRootMode(arg1:boolean):Promise<void>;
 

@@ -183,6 +183,7 @@ func (s *ServerAPI) GetContacts(userid string) ([]Contact, error) {
 			CorpName       string `json:"corp_name"`
 			Avatar         string `json:"avatar"`
 			Gender         int    `json:"gender"`
+			AddTime        int64  `json:"add_time"`
 		} `json:"contacts"`
 		Total int `json:"total"`
 	}
@@ -197,6 +198,7 @@ func (s *ServerAPI) GetContacts(userid string) ([]Contact, error) {
 			Name:           c.Name,
 			Type:           c.Type,
 			CorpName:       c.CorpName,
+			AddTime:        c.AddTime,
 		}
 	}
 	return contacts, nil
@@ -258,19 +260,18 @@ func (s *ServerAPI) GetFollowUserList() ([]string, error) {
 	return userIDs, nil
 }
 
-// CustomerGroupCheckResult 客户群检查结果
-type CustomerGroupCheckResult struct {
-	ExternalUserID string `json:"external_user_id"`
-	InGroup        bool   `json:"in_group"`
-	GroupCount     int    `json:"group_count"`
+// GroupCheckResult 单个客户的群检查结果
+type GroupCheckResult struct {
+	InGroup    bool
+	GroupCount int
 }
 
 // CheckCustomerInGroups 批量检查外部联系人是否已在客户群中
 // 调用: GET /admin/wecom/customer-groups/members-check?external_userids=id1,id2,...
 // 服务端有内存缓存, O(1) 查询, 瞬间返回
-func (s *ServerAPI) CheckCustomerInGroups(externalUserIDs []string) (map[string]bool, error) {
+func (s *ServerAPI) CheckCustomerInGroups(externalUserIDs []string) (map[string]GroupCheckResult, error) {
 	if len(externalUserIDs) == 0 {
-		return map[string]bool{}, nil
+		return map[string]GroupCheckResult{}, nil
 	}
 
 	// 逗号拼接 (最多 50 个一批)
@@ -295,10 +296,13 @@ func (s *ServerAPI) CheckCustomerInGroups(externalUserIDs []string) (map[string]
 		return nil, fmt.Errorf("解析客户群检查结果失败: %w", err)
 	}
 
-	// 构建 map: external_userid → in_group
-	m := make(map[string]bool, len(result.Results))
+	// 构建 map: external_userid → GroupCheckResult
+	m := make(map[string]GroupCheckResult, len(result.Results))
 	for _, r := range result.Results {
-		m[r.ExternalUserID] = r.InGroup
+		m[r.ExternalUserID] = GroupCheckResult{
+			InGroup:    r.InGroup,
+			GroupCount: r.GroupCount,
+		}
 	}
 	return m, nil
 }

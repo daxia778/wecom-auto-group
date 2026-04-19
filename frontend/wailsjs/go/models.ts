@@ -8,6 +8,7 @@ export namespace main {
 	    need_review_list?: string[];
 	    test_customer_names?: string[];
 	    root_mode?: boolean;
+	    auto_cutoff_time?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppState(source);
@@ -22,6 +23,7 @@ export namespace main {
 	        this.need_review_list = source["need_review_list"];
 	        this.test_customer_names = source["test_customer_names"];
 	        this.root_mode = source["root_mode"];
+	        this.auto_cutoff_time = source["auto_cutoff_time"];
 	    }
 	}
 	export class Contact {
@@ -29,6 +31,8 @@ export namespace main {
 	    name: string;
 	    type: number;
 	    corp_name: string;
+	    group_count: number;
+	    add_time: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Contact(source);
@@ -40,6 +44,8 @@ export namespace main {
 	        this.name = source["name"];
 	        this.type = source["type"];
 	        this.corp_name = source["corp_name"];
+	        this.group_count = source["group_count"];
+	        this.add_time = source["add_time"];
 	    }
 	}
 	export class GroupChat {

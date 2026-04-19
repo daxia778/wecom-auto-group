@@ -6,6 +6,10 @@ export function CreateGroupForCustomer(arg1, arg2) {
   return window['go']['main']['App']['CreateGroupForCustomer'](arg1, arg2);
 }
 
+export function GetAutoCutoffTime() {
+  return window['go']['main']['App']['GetAutoCutoffTime']();
+}
+
 export function GetContacts(arg1) {
   return window['go']['main']['App']['GetContacts'](arg1);
 }
@@ -48,6 +52,10 @@ export function SaveSettings(arg1, arg2, arg3) {
 
 export function SaveTestAccounts(arg1) {
   return window['go']['main']['App']['SaveTestAccounts'](arg1);
+}
+
+export function SetAutoCutoffTime(arg1) {
+  return window['go']['main']['App']['SetAutoCutoffTime'](arg1);
 }
 
 export function SetRootMode(arg1) {

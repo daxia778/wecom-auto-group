@@ -46,9 +46,10 @@ type AppState struct {
 	TargetUserID       string           `json:"target_userid"`
 	FixedMembers       []string         `json:"fixed_members"`
 	GroupOwner         string           `json:"group_owner"`
-	NeedReviewList     []string         `json:"need_review_list,omitempty"` // 需人工复核的 uid
+	NeedReviewList     []string         `json:"need_review_list,omitempty"`     // 需人工复核的 uid
 	TestCustomerNames  []string         `json:"test_customer_names,omitempty"` // 测试账号: 跳过防重, 每次都建群
 	RootMode           bool             `json:"root_mode,omitempty"`           // Root模式: 所有客户跳过防重, 无限建群
+	AutoCutoffTime     int64            `json:"auto_cutoff_time,omitempty"`    // 全自动模式起始时间 (unix), 仅处理此时间后添加的客户
 }
 
 func NewApp() *App {
@@ -223,6 +224,51 @@ func (a *App) StartLoadContacts(userid string) {
 				} else if a.isProcessed(contacts[i].ExternalUserID) {
 					contacts[i].Name = contacts[i].Name + " ✅"
 				}
+			}
+		}
+
+		// ═══ 批量查询外部群状态 (注入 GroupCount 到每个联系人) ═══
+		if a.serverAPI != nil && a.serverAPI.token != "" {
+			a.addLog("   📡 批量查询客户群状态...")
+			var allIDs []string
+			for _, c := range contacts {
+				allIDs = append(allIDs, c.ExternalUserID)
+			}
+			if len(allIDs) > 0 {
+				// 分批查询 (每批 50 个, 避免 URL 过长)
+				checkBatch := 50
+				groupMap := make(map[string]GroupCheckResult)
+				for i := 0; i < len(allIDs); i += checkBatch {
+					end := i + checkBatch
+					if end > len(allIDs) {
+						end = len(allIDs)
+					}
+					batch := allIDs[i:end]
+					results, batchErr := a.serverAPI.CheckCustomerInGroups(batch)
+					if batchErr != nil {
+						a.addLog(fmt.Sprintf("   ⚠️ 群状态查询失败: %v", batchErr))
+						break
+					}
+					for k, v := range results {
+						groupMap[k] = v
+					}
+				}
+				// 注入到联系人
+				inGroupCount := 0
+				multiGroupCount := 0
+				for i := range contacts {
+					if r, ok := groupMap[contacts[i].ExternalUserID]; ok {
+						contacts[i].GroupCount = r.GroupCount
+						if r.GroupCount >= 1 {
+							inGroupCount++
+						}
+						if r.GroupCount > 1 {
+							multiGroupCount++
+						}
+					}
+				}
+				a.addLog(fmt.Sprintf("   ✅ 群状态: %d 人已在群, %d 人多群, %d 人未建群",
+					inGroupCount, multiGroupCount, len(contacts)-inGroupCount))
 			}
 		}
 
@@ -500,8 +546,9 @@ func (a *App) agentLoop() {
 	cycle := 0
 	for a.running {
 		cycle++
-		a.addLog(fmt.Sprintf("🔄 [#%d] 开始巡检 (主理人=%s, 成员=%v)...",
-			cycle, a.state.TargetUserID, a.state.FixedMembers))
+		a.addLog(fmt.Sprintf("🔄 [#%d] 开始巡检 (主理人=%s, 成员=%v, cutoff=%s)...",
+			cycle, a.state.TargetUserID, a.state.FixedMembers,
+			time.Unix(a.getAutoCutoffTime(), 0).Format("01-02 15:04")))
 
 		contacts, err := a.api.GetContacts(a.state.TargetUserID)
 		if err != nil {
@@ -511,7 +558,7 @@ func (a *App) agentLoop() {
 				len(contacts), len(a.state.ProcessedCustomers)))
 
 			// ═══ 第 1 层: API 精确检查 — 外部联系人是否已在客户群 ═══
-			inGroupMap := make(map[string]bool)
+			inGroupMap := make(map[string]GroupCheckResult)
 			if a.serverAPI != nil && a.serverAPI.token != "" {
 				// 收集未处理联系人的 external_userid
 				var uncheckedIDs []string
@@ -527,7 +574,7 @@ func (a *App) agentLoop() {
 						inGroupMap = checkResult
 						inCount := 0
 						for _, v := range checkResult {
-							if v {
+							if v.InGroup {
 								inCount++
 							}
 						}
@@ -576,6 +623,19 @@ func (a *App) agentLoop() {
 					continue
 				}
 
+				// ═══ 时间过滤: 仅处理 cutoff 时间后添加的新客户 (测试账号跳过) ═══
+				cutoff := a.getAutoCutoffTime()
+				if c.AddTime > 0 && c.AddTime < cutoff && !a.isTestAccount(c.Name) {
+					skipped++
+					continue
+				}
+				if c.AddTime == 0 && !a.isTestAccount(c.Name) {
+					// AddTime 未知 (服务端未返回), 跳过以确保安全
+					a.addLog(fmt.Sprintf("   ⚠️ 跳过【%s】(无添加时间, 无法确认是否新客户)", c.Name))
+					skipped++
+					continue
+				}
+
 				// 第 3 层: 本地已处理记录 (测试账号跳过此检查)
 				if a.isProcessed(c.ExternalUserID) && !a.isTestAccount(c.Name) {
 					skipped++
@@ -583,8 +643,8 @@ func (a *App) agentLoop() {
 				}
 
 				// 第 1 层: API 精确检查 (测试账号跳过此检查)
-				if inGroup, ok := inGroupMap[c.ExternalUserID]; ok && inGroup && !a.isTestAccount(c.Name) {
-					a.addLog(fmt.Sprintf("   ✅ 跳过【%s】(API: 已在客户群)", c.Name))
+				if gResult, ok := inGroupMap[c.ExternalUserID]; ok && gResult.InGroup && !a.isTestAccount(c.Name) {
+					a.addLog(fmt.Sprintf("   ✅ 跳过【%s】(API: 已在 %d 个客户群)", c.Name, gResult.GroupCount))
 					a.markProcessed(c.ExternalUserID)
 					skipped++
 					continue
@@ -659,6 +719,29 @@ func (a *App) markNeedReview(uid string) {
 	}
 	a.state.NeedReviewList = append(a.state.NeedReviewList, uid)
 	a.saveState()
+}
+
+// getAutoCutoffTime 获取全自动模式的起始时间 (仅处理此时间后的新客户)
+// 默认: 2026-04-20 00:00:00 北京时间
+func (a *App) getAutoCutoffTime() int64 {
+	if a.state.AutoCutoffTime > 0 {
+		return a.state.AutoCutoffTime
+	}
+	// 默认 cutoff: 2026-04-20 00:00:00 +08:00
+	return time.Date(2026, 4, 20, 0, 0, 0, 0, time.FixedZone("CST", 8*3600)).Unix()
+}
+
+// SetAutoCutoffTime 设置全自动模式起始时间 (前端可调用)
+func (a *App) SetAutoCutoffTime(unixTime int64) {
+	a.state.AutoCutoffTime = unixTime
+	a.saveState()
+	t := time.Unix(unixTime, 0).Format("2006-01-02 15:04:05")
+	a.addLog(fmt.Sprintf("⏰ 全自动起始时间已设置: %s", t))
+}
+
+// GetAutoCutoffTime 获取当前 cutoff 时间 (前端可调用)
+func (a *App) GetAutoCutoffTime() int64 {
+	return a.getAutoCutoffTime()
 }
 
 // isTestAccount 检查客户名是否是测试账号 (测试账号跳过所有防重检查)

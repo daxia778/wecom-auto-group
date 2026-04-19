@@ -34,6 +34,8 @@ type Contact struct {
 	Name           string `json:"name"`
 	Type           int    `json:"type"`
 	CorpName       string `json:"corp_name"`
+	GroupCount     int    `json:"group_count"` // 所在外部群数量 (API 查询)
+	AddTime        int64  `json:"add_time"`    // 添加时间 (unix timestamp)
 }
 
 // GroupChat 客户群
@@ -219,6 +221,10 @@ func (w *WeComAPI) GetContacts(userid string) ([]Contact, error) {
 				Type     int    `json:"type"`
 				CorpName string `json:"corp_name"`
 			} `json:"external_contact"`
+			FollowUser []struct {
+				UserID  string `json:"userid"`
+				AddTime int64  `json:"createtime"`
+			} `json:"follow_user"`
 		}
 		if err := json.Unmarshal(detail, &detailResult); err != nil {
 			continue
@@ -226,11 +232,20 @@ func (w *WeComAPI) GetContacts(userid string) ([]Contact, error) {
 		if detailResult.ErrCode != 0 {
 			continue
 		}
+		// 找到当前员工对应的 add_time
+		var addTime int64
+		for _, fu := range detailResult.FollowUser {
+			if strings.EqualFold(fu.UserID, userid) {
+				addTime = fu.AddTime
+				break
+			}
+		}
 		contacts = append(contacts, Contact{
 			ExternalUserID: extID,
 			Name:           detailResult.ExternalContact.Name,
 			Type:           detailResult.ExternalContact.Type,
 			CorpName:       detailResult.ExternalContact.CorpName,
+			AddTime:        addTime,
 		})
 		// 每 20 个打印一次进度 (用于调试)
 		_ = i
